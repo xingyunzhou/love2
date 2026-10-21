@@ -128,6 +128,14 @@
       <label>默认鉴权前缀<input name="default_auth_prefix" placeholder="Bearer " /></label>
       <label class="check"><input name="clear_default_api_key" type="checkbox" /> 清空已保存的默认密钥</label>
 
+      <h2>日志与清理</h2>
+      <label>日志保留条数（0 = 不限）<input name="log_keep" type="number" min="0" /></label>
+      <label>日志保留小时数（0 = 不限）<input name="log_keep_hours" type="number" min="0" /></label>
+      <label>会话粘性表最多几行<input name="affinity_max" type="number" min="0" /></label>
+      <div class="form-actions" style="justify-content: flex-start">
+        <button type="button" id="maintenanceBtn" class="ghost">立即清理一次</button>
+      </div>
+
       <h2>余额不足判定关键词</h2>
       <label class="full">逗号分隔，命中响应体就判定为余额/额度不足
         <textarea name="quota_keywords" rows="3"></textarea>

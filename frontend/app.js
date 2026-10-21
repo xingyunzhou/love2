@@ -110,6 +110,8 @@ function renderStats(stats) {
     { label: "失败", value: stats.fail, cls: stats.fail ? "err" : "" },
     { label: "平均延迟", value: `${stats.avg_latency_ms}ms`, cls: "" },
     { label: "粘性会话", value: stats.sticky_sessions ?? 0, cls: "" },
+    { label: "日志条数", value: stats.logs ?? 0, cls: "" },
+    { label: "库体积", value: `${stats.db_mb ?? 0} MB`, cls: "" },
   ];
   $("#stats").innerHTML = cards
     .map((c) => `<div class="stat ${c.cls}"><b>${esc(c.value)}</b><span>${esc(c.label)}</span></div>`)
@@ -214,6 +216,16 @@ $("#clearLogsBtn").addEventListener("click", async () => {
   state.logs = [];
   renderLogs();
   toast("日志已清空");
+});
+$("#maintenanceBtn").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/maintenance", { method: "POST" });
+    toast(`清理完成：日志 -${r.removed_logs}，会话 -${r.removed_sessions}${r.vacuumed ? "，已 VACUUM" : ""}`);
+    refresh();
+    loadSettings();
+  } catch (err) {
+    toast(String(err.message || err), true);
+  }
 });
 $("#probeAllBtn").addEventListener("click", async () => {
   const btn = $("#probeAllBtn");
@@ -346,6 +358,7 @@ $("#settingsForm").addEventListener("submit", async (e) => {
   const numeric = [
     "max_attempts", "request_timeout", "cooldown_quota", "cooldown_auth",
     "cooldown_rate", "cooldown_server", "probe_interval", "probe_timeout",
+    "sticky_ttl", "log_keep", "log_keep_hours", "affinity_max",
   ];
   const patch = {
     strategy: form.strategy.value,
@@ -353,6 +366,7 @@ $("#settingsForm").addEventListener("submit", async (e) => {
     quota_keywords: form.quota_keywords.value,
     default_auth_header: form.default_auth_header.value.trim() || "Authorization",
     default_auth_prefix: form.default_auth_prefix.value,
+    sticky_spread: form.sticky_spread ? form.sticky_spread.value : undefined,
   };
   for (const key of numeric) patch[key] = Number(form.elements[key].value) || 0;
   const newDefaultKey = form.default_api_key.value.trim();

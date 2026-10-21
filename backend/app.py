@@ -86,6 +86,9 @@ class SettingsPatch(BaseModel):
     sticky_ttl: Optional[int] = None
     sticky_header: Optional[str] = None
     sticky_spread: Optional[str] = None
+    log_keep: Optional[int] = None
+    log_keep_hours: Optional[int] = None
+    affinity_max: Optional[int] = None
 
 
 # ------------------------------------------------------------------ 序列化
@@ -156,6 +159,7 @@ async def lifespan(app: FastAPI):
     db.init()
     stop = asyncio.Event()
     task = asyncio.create_task(pool.auto_probe_loop(stop))
+    house = asyncio.create_task(housekeeping_loop(stop))
     pool.log("info", "system", "号池服务启动")
     if not config.ADMIN_TOKEN:
         pool.log("warn", "system", "ADMIN_TOKEN 未设置，管理面板无口令保护")
@@ -164,6 +168,31 @@ async def lifespan(app: FastAPI):
     finally:
         stop.set()
         task.cancel()
+        house.cancel()
+
+
+async def housekeeping_loop(stop: asyncio.Event) -> None:
+    """每 5 分钟裁日志、裁会话表、截断 WAL；一天最多 VACUUM 一次。"""
+    last_vacuum = time.time()
+    while not stop.is_set():
+        try:
+            settings = db.get_settings()
+            removed = db.trim_logs(int(settings.get("log_keep") or 0),
+                                   int(settings.get("log_keep_hours") or 0))
+            db.trim_affinity(int(settings.get("affinity_max") or 0))
+            db.checkpoint()
+            if removed:
+                pool.log("info", "housekeeping", f"按保留策略清理日志 {removed} 条")
+            if time.time() - last_vacuum > 86400:
+                if db.vacuum_if_bloated():
+                    pool.log("info", "housekeeping", "空页占比偏高，已 VACUUM 收缩数据库")
+                last_vacuum = time.time()
+        except Exception as exc:  # noqa: BLE001 - 清理任务不能把进程带走
+            pool.log("error", "housekeeping", f"清理任务异常: {type(exc).__name__}: {exc}")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=300)
+        except asyncio.TimeoutError:
+            continue
 
 
 app = FastAPI(title="Endpoint Pool", version="1.0.0", lifespan=lifespan)
@@ -182,6 +211,7 @@ async def overview() -> dict[str, Any]:
     ok = sum(1 for e in items if e["status"] == "ok")
     cooling = sum(1 for e in items if e["status"] == "cooling")
     disabled = sum(1 for e in items if not e["enabled"])
+    disk = db.stats()
     return {
         "endpoints": items,
         "stats": {
@@ -197,7 +227,10 @@ async def overview() -> dict[str, Any]:
                 max(1, sum(1 for e in items if e["last_latency_ms"])), 1
             ),
             "sticky_sessions": db.count_affinity(),
+            "logs": disk["logs"],
+            "db_mb": round((disk["db_bytes"] + disk["wal_bytes"]) / 1048576, 2),
         },
+        "disk": disk,
         "settings": public_settings(db.get_settings()),
         "admin_token_required": bool(config.ADMIN_TOKEN),
         "proxy_token_required": bool(config.PROXY_TOKEN),
@@ -357,6 +390,24 @@ async def get_logs(limit: int = Query(default=200, ge=1, le=2000)) -> dict[str, 
 async def delete_logs() -> dict[str, Any]:
     db.clear_logs()
     return {"ok": True}
+
+
+@app.post("/api/maintenance", dependencies=[Depends(admin)])
+async def maintenance() -> dict[str, Any]:
+    """立刻按保留策略清一次，并截断 WAL；空页多的话顺手 VACUUM。"""
+    settings = db.get_settings()
+    removed = db.trim_logs(int(settings.get("log_keep") or 0),
+                           int(settings.get("log_keep_hours") or 0))
+    sessions = db.trim_affinity(int(settings.get("affinity_max") or 0))
+    db.checkpoint()
+    vacuumed = db.vacuum_if_bloated()
+    pool.log("info", "admin", f"手动维护：清日志 {removed} 条，清会话 {sessions} 条")
+    return {
+        "removed_logs": removed,
+        "removed_sessions": sessions,
+        "vacuumed": vacuumed,
+        "stats": db.stats(),
+    }
 
 
 @app.get("/api/logs/stream")

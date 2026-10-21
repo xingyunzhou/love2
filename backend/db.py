@@ -99,6 +99,10 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "sticky_header": "x-session-id",
     # 新会话怎么挑号：hash = 一致性哈希（稳定），least_used = 按当前请求量挑最闲的
     "sticky_spread": "hash",
+    # 日志保留：条数上限 + 时间上限，双阈值谁先到砍谁
+    "log_keep": int(LOG_KEEP),
+    "log_keep_hours": 168,
+    "affinity_max": 20000,
 }
 
 _ENDPOINT_COLUMNS = (
@@ -337,3 +341,77 @@ def list_logs(limit: int = 200) -> list[dict[str, Any]]:
 
 def clear_logs() -> None:
     run("DELETE FROM logs")
+
+
+# ---------------------------------------------------------------- 清理与体积
+def trim_logs(keep: int = 0, hours: int = 0) -> int:
+    """双阈值裁剪：先按时间砍，再按条数砍；返回删掉多少条。"""
+    removed = 0
+    with _lock:
+        c = conn()
+        if hours > 0:
+            cur = c.execute("DELETE FROM logs WHERE ts < ?", (time.time() - hours * 3600,))
+            removed += max(cur.rowcount, 0)
+        if keep > 0:
+            cur = c.execute(
+                "DELETE FROM logs WHERE id NOT IN "
+                "(SELECT id FROM logs ORDER BY id DESC LIMIT ?)",
+                (keep,),
+            )
+            removed += max(cur.rowcount, 0)
+        c.commit()
+    return removed
+
+
+def trim_affinity(max_rows: int) -> int:
+    if max_rows <= 0:
+        return 0
+    with _lock:
+        c = conn()
+        cur = c.execute(
+            "DELETE FROM affinity WHERE session_key NOT IN "
+            "(SELECT session_key FROM affinity ORDER BY updated_at DESC LIMIT ?)",
+            (max_rows,),
+        )
+        c.commit()
+        return max(cur.rowcount, 0)
+
+
+def checkpoint() -> None:
+    """把 WAL 合回主库并截断，否则 -wal 文件会一直涨。"""
+    with _lock:
+        try:
+            conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
+
+
+def vacuum_if_bloated(ratio: float = 0.3, min_pages: int = 5000) -> bool:
+    """空页占比过高才 VACUUM，删行后文件不会自己缩。"""
+    with _lock:
+        c = conn()
+        try:
+            page_count = c.execute("PRAGMA page_count").fetchone()[0] or 0
+            free_pages = c.execute("PRAGMA freelist_count").fetchone()[0] or 0
+        except sqlite3.Error:
+            return False
+        if page_count < min_pages or free_pages / page_count < ratio:
+            return False
+        try:
+            c.execute("VACUUM")
+            return True
+        except sqlite3.Error:
+            return False
+
+
+def stats() -> dict[str, int]:
+    db_bytes = DB_PATH.stat().st_size if DB_PATH.exists() else 0
+    wal_path = DB_PATH.with_name(DB_PATH.name + "-wal")
+    wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+    log_row = one("SELECT COUNT(*) AS c FROM logs") or {"c": 0}
+    return {
+        "logs": int(log_row["c"]),
+        "affinity": count_affinity(),
+        "db_bytes": int(db_bytes),
+        "wal_bytes": int(wal_bytes),
+    }

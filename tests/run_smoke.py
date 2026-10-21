@@ -238,6 +238,20 @@ def main() -> int:
             assert client.get("/api/overview", headers=H).json()["stats"]["total"] == 4
             print("  删除: ok")
 
+            # 11) 日志自动清理：条数上限 + 时间上限 + WAL 截断
+            client.put("/api/settings", headers=H, json={"log_keep": 5, "log_keep_hours": 168})
+            before = client.get("/api/overview", headers=H).json()["disk"]
+            assert before["logs"] > 5, before
+            r = client.post("/api/maintenance", headers=H).json()
+            assert r["removed_logs"] > 0, r
+            assert r["stats"]["logs"] <= 10, r["stats"]  # 清理后自己又写了一条
+            assert r["stats"]["db_bytes"] > 0
+            ov = client.get("/api/overview", headers=H).json()
+            assert client.get("/api/settings", headers=H).json()["log_keep"] == 5
+            assert "disk" in ov and "db_bytes" in ov["disk"], ov.get("disk")
+            print(f"  日志清理: {before['logs']} → {r['stats']['logs']} 条，"
+                  f"库 {ov['stats']['db_mb']} MB")
+
         print("\nALL SMOKE CHECKS PASSED")
         return 0
     finally:
