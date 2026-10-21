@@ -1,0 +1,22 @@
+services:
+  pool:
+    image: ghcr.io/your-github-name/endpoint-pool:latest
+    # 想本地构建就把上面 image 换成 build: . 并注释掉 image
+    # build: .
+    container_name: endpoint-pool
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      ADMIN_TOKEN: "change-me-admin"      # 面板口令，务必改
+      PROXY_TOKEN: ""                      # 留空 = /v1 转发不校验口令
+      SECRET_KEY: "change-me-please-32bytes"  # 加密入库的 api_key，改后旧密钥会解不开
+      LOG_KEEP: "3000"
+      TZ: "Asia/Shanghai"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3

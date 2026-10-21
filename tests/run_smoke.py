@@ -1,0 +1,179 @@
+# language: Python, file: tests/run_smoke.py
+"""端到端冒烟（进程内）：起假上游线程 + FastAPI TestClient，验证轮询/换号/冷却/探活/日志。
+
+用法：python tests/run_smoke.py   （数据落在 ./data，跑完自动清掉测试库）
+"""
+from __future__ import annotations
+
+import os
+import sys
+import threading
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+DATA_DIR = ROOT / "data"
+DATA_DIR.mkdir(exist_ok=True)
+os.environ["DATA_DIR"] = str(DATA_DIR)
+os.environ["ADMIN_TOKEN"] = "smoke-token"
+
+for leftover in ("pool.db", "pool.db-wal", "pool.db-shm"):
+    try:
+        (DATA_DIR / leftover).unlink()
+    except FileNotFoundError:
+        pass
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from backend.app import app  # noqa: E402
+from tests.mock_upstream import Handler  # noqa: E402
+
+H = {"x-admin-token": "smoke-token"}
+PORTS = (8899, 8900, 8901)
+SERVERS = []
+
+
+def start_upstreams() -> None:
+    for port in PORTS:
+        srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        SERVERS.append(srv)
+
+
+def stop_upstreams() -> None:
+    for srv in SERVERS:
+        srv.shutdown()
+        srv.server_close()
+
+
+def main() -> int:
+    start_upstreams()
+    try:
+        with TestClient(app) as client:
+            # 1) 健康检查 / 鉴权
+            assert client.get("/api/health").json()["ok"] is True
+            assert client.get("/api/overview").status_code == 401, "缺少口令应 401"
+            assert client.get("/api/pool/status").status_code == 200
+
+            # 2) 建池：余额不足 / 鉴权失败 / 正常
+            add = [
+                {"name": "dead-quota", "base_url": f"http://127.0.0.1:{PORTS[0]}", "api_key": "sk-quota"},
+                {"name": "dead-auth", "base_url": f"http://127.0.0.1:{PORTS[1]}", "api_key": "sk-auth"},
+                {"name": "alive", "base_url": f"http://127.0.0.1:{PORTS[2]}", "api_key": "sk-alive"},
+            ]
+            ids = []
+            for item in add:
+                r = client.post("/api/endpoints", headers=H, json=item)
+                assert r.status_code == 200, r.text
+                body = r.json()
+                ids.append(body["id"])
+                assert body["has_key"] is True
+                assert item["api_key"] not in body["api_key_masked"], body["api_key_masked"]
+            assert len(client.get("/api/overview", headers=H).json()["endpoints"]) == 3
+
+            # 3) 首次调用：坏号被冷却，最后由 alive 返回（自动换号）
+            payload = {"model": "mock-model", "messages": [{"role": "user", "content": "hi"}]}
+            r = client.post("/v1/chat/completions", json=payload)
+            assert r.status_code == 200, r.text
+            assert r.json()["served_by_key"] == "sk-alive", r.text
+            print(f"  首次调用 → {r.json()['served_by_key']} "
+                  f"(x-pool-endpoint={r.headers['x-pool-endpoint']}, attempt={r.headers['x-pool-attempt']})")
+
+            ov = client.get("/api/overview", headers=H).json()
+            by_name = {e["name"]: e for e in ov["endpoints"]}
+            assert by_name["dead-quota"]["status"] == "cooling", by_name["dead-quota"]
+            assert by_name["dead-auth"]["status"] == "cooling", by_name["dead-auth"]
+            assert by_name["alive"]["status"] == "ok", by_name["alive"]
+            print(f"  冷却: dead-quota {by_name['dead-quota']['cooldown_left']}s ← "
+                  f"{by_name['dead-quota']['last_error'][:60]}")
+            print(f"  冷却: dead-auth  {by_name['dead-auth']['cooldown_left']}s ← "
+                  f"{by_name['dead-auth']['last_error'][:60]}")
+
+            # 4) 后续请求不再碰冷却中的接口
+            for _ in range(3):
+                r = client.post("/v1/chat/completions", json=payload)
+                assert r.status_code == 200 and r.json()["served_by_key"] == "sk-alive", r.text
+            print("  轮询自动跳过冷却接口: ok")
+
+            # 4.5) base_url 自带 /v1 时不应拼成 /v1/v1（先停掉其它活号，让它必须被选中）
+            r = client.post("/api/endpoints", headers=H,
+                            json={"name": "v1-suffix", "base_url": f"http://127.0.0.1:{PORTS[2]}/v1", "api_key": "sk-v1suffix"})
+            assert r.status_code == 200, r.text
+            v1_id = r.json()["id"]
+            client.post(f"/api/endpoints/{ids[2]}/toggle", headers=H)  # 停用 alive
+            r = client.post("/v1/chat/completions", json=payload)
+            assert r.status_code == 200, r.text
+            assert r.json()["served_by_key"] == "sk-v1suffix", r.text
+            client.post(f"/api/endpoints/{ids[2]}/toggle", headers=H)  # 恢复 alive
+            client.delete(f"/api/endpoints/{v1_id}", headers=H)
+            print("  base_url 带 /v1 不重复拼接: ok")
+
+            # 5) 上游 500 / 429 也走换号
+            for name, key in (("boom", "sk-500"), ("limited", "sk-429")):
+                client.post("/api/endpoints", headers=H,
+                            json={"name": name, "base_url": f"http://127.0.0.1:{PORTS[0]}", "api_key": key})
+            ov = client.get("/api/overview", headers=H).json()
+            assert ov["stats"]["total"] == 5
+            for _ in range(2):
+                r = client.post("/v1/chat/completions", json=payload)
+                assert r.status_code == 200 and r.json()["served_by_key"] == "sk-alive", r.text
+            by_name = {e["name"]: e for e in client.get("/api/overview", headers=H).json()["endpoints"]}
+            assert by_name["boom"]["status"] == "cooling"
+            assert by_name["limited"]["status"] == "cooling"
+            print("  5xx / 429 冷却: ok")
+
+            # 6) 探活 + 重置
+            r = client.post(f"/api/endpoints/{ids[2]}/probe", headers=H)
+            assert r.status_code == 200 and r.json()["ok"] is True, r.text
+            r = client.post(f"/api/endpoints/{ids[0]}/reset?counters=true", headers=H)
+            assert r.json()["status"] == "ok" and r.json()["total_requests"] == 0, r.text
+            r = client.post(f"/api/endpoints/{ids[1]}/toggle", headers=H)
+            assert r.json()["enabled"] is False
+            r = client.post(f"/api/endpoints/{ids[1]}/toggle", headers=H)
+            assert r.json()["enabled"] is True
+            print("  探活 / 重置 / 启停: ok")
+
+            # 7) 设置校验
+            s = client.put("/api/settings", headers=H,
+                           json={"strategy": "least_used", "max_attempts": 3, "cooldown_quota": 600}).json()
+            assert s["strategy"] == "least_used" and s["max_attempts"] == 3 and s["cooldown_quota"] == 600
+            assert client.put("/api/settings", headers=H, json={"strategy": "nope"}).status_code == 400
+            print("  设置校验: ok")
+
+            # 8) 日志已经记下换号过程
+            logs = client.get("/api/logs?limit=80", headers=H).json()["logs"]
+            kinds = {l["kind"] for l in logs}
+            assert {"quota", "auth"} <= kinds, kinds
+            assert any(l["kind"] == "route" for l in logs)
+            print(f"  日志: {len(logs)} 条，种类 {sorted(k for k in kinds if k)}")
+
+            # 9) 前端静态资源
+            r = client.get("/")
+            assert r.status_code == 200 and "号池控制台" in r.text
+            assert client.get("/app.js").status_code == 200
+            assert client.get("/style.css").status_code == 200
+            print("  静态前端: ok")
+
+            # 10) 删除
+            assert client.delete(f"/api/endpoints/{ids[0]}", headers=H).status_code == 200
+            assert client.get("/api/overview", headers=H).json()["stats"]["total"] == 4
+            print("  删除: ok")
+
+        print("\nALL SMOKE CHECKS PASSED")
+        return 0
+    finally:
+        stop_upstreams()
+        from backend import db as _db
+        _db.close()
+        for leftover in ("pool.db", "pool.db-wal", "pool.db-shm"):
+            try:
+                (DATA_DIR / leftover).unlink()
+            except (FileNotFoundError, PermissionError):
+                pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>号池控制台 · Endpoint Pool</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div id="loginMask" class="login hidden">
+  <form id="loginForm" class="login-card">
+    <h1>号池控制台</h1>
+    <p class="muted">输入管理口令（环境变量 ADMIN_TOKEN）</p>
+    <input id="loginToken" type="password" placeholder="admin token" autocomplete="current-password" />
+    <button class="primary" type="submit">进入</button>
+    <p id="loginError" class="error"></p>
+  </form>
+</div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="pulse"></span>
+    <span>号池控制台</span>
+    <small>Endpoint Pool</small>
+  </div>
+  <div class="proxy-chip">
+    <span class="muted">代理地址</span>
+    <code id="proxyBase">/v1</code>
+    <button id="copyBtn" class="ghost">复制</button>
+  </div>
+  <div class="top-actions">
+    <button id="probeAllBtn" class="ghost">全部探活</button>
+    <button id="batchBtn" class="ghost">批量导入</button>
+    <button id="addBtn" class="primary">+ 添加接口</button>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="pool">接口池</button>
+  <button class="tab" data-tab="logs">实时日志</button>
+  <button class="tab" data-tab="settings">设置</button>
+  <span class="spacer"></span>
+  <span id="clock" class="muted mono"></span>
+</nav>
+
+<main>
+  <section id="tab-pool">
+    <div id="stats" class="stats"></div>
+    <div class="table-wrap">
+      <table class="pool">
+        <thead>
+          <tr>
+            <th>状态</th><th>名称</th><th>地址</th><th>密钥</th>
+            <th>请求 / 成功</th><th>成功率</th><th>延迟</th><th>最近错误</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="poolBody"></tbody>
+      </table>
+      <p id="emptyHint" class="empty hidden">号池里还没有接口，点右上角「+ 添加接口」开始。</p>
+    </div>
+  </section>
+
+  <section id="tab-logs" class="hidden">
+    <div class="log-bar">
+      <label class="check"><input id="autoScroll" type="checkbox" checked /> 自动滚动</label>
+      <select id="logFilter">
+        <option value="">全部级别</option>
+        <option value="info">info</option>
+        <option value="warn">warn</option>
+        <option value="error">error</option>
+      </select>
+      <span class="spacer"></span>
+      <button id="clearLogsBtn" class="ghost">清空日志</button>
+    </div>
+    <ul id="logList" class="log-list"></ul>
+  </section>
+
+  <section id="tab-settings" class="hidden">
+    <form id="settingsForm" class="settings">
+      <h2>路由策略</h2>
+      <label>选号策略
+        <select name="strategy">
+          <option value="round_robin">轮询 round_robin</option>
+          <option value="weighted">加权轮询 weighted</option>
+          <option value="least_used">最少使用 least_used</option>
+          <option value="priority">优先级 priority</option>
+          <option value="random">随机 random</option>
+        </select>
+      </label>
+      <label>单次请求最多换号次数<input name="max_attempts" type="number" min="1" max="20" /></label>
+      <label>请求超时（秒）<input name="request_timeout" type="number" min="5" max="3600" /></label>
+
+      <h2>冷却时间（秒）</h2>
+      <label>余额/额度不足<input name="cooldown_quota" type="number" min="0" /></label>
+      <label>鉴权失败 401/403<input name="cooldown_auth" type="number" min="0" /></label>
+      <label>限流 429<input name="cooldown_rate" type="number" min="0" /></label>
+      <label>5xx / 网络错误<input name="cooldown_server" type="number" min="0" /></label>
+
+      <h2>探活</h2>
+      <label>探活路径<input name="probe_path" placeholder="/v1/models" /></label>
+      <label>自动探活间隔（秒，0 = 关闭）<input name="probe_interval" type="number" min="0" /></label>
+      <label>探活超时（秒）<input name="probe_timeout" type="number" min="3" /></label>
+
+      <h2>余额不足判定关键词</h2>
+      <label class="full">逗号分隔，命中响应体就判定为余额/额度不足
+        <textarea name="quota_keywords" rows="3"></textarea>
+      </label>
+
+      <div class="form-actions">
+        <button class="primary" type="submit">保存设置</button>
+      </div>
+    </form>
+  </section>
+</main>
+
+<dialog id="epDialog">
+  <form id="epForm" method="dialog">
+    <h2 id="epDialogTitle">添加接口</h2>
+    <input type="hidden" name="id" />
+    <label>名称<input name="name" placeholder="留空自动取域名" /></label>
+    <label>Base URL<input name="base_url" placeholder="https://xxx.lovable.app" required /></label>
+    <label>API Key
+      <input name="api_key" placeholder="编辑时留空 = 不修改" autocomplete="off" />
+    </label>
+    <label>鉴权头名<input name="auth_header" value="Authorization" /></label>
+    <label>鉴权前缀<input name="auth_prefix" value="Bearer " /></label>
+    <label>强制模型（留空则透传请求里的 model）<input name="model" placeholder="如 gpt-4o-mini" /></label>
+    <div class="row">
+      <label>权重<input name="weight" type="number" min="1" value="1" /></label>
+      <label>优先级<input name="priority" type="number" value="0" /></label>
+    </div>
+    <label>备注<input name="notes" /></label>
+    <label class="check"><input name="enabled" type="checkbox" checked /> 启用</label>
+    <div class="form-actions">
+      <button type="button" class="ghost" onclick="document.getElementById('epDialog').close()">取消</button>
+      <button type="submit" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="batchDialog">
+  <form id="batchForm" method="dialog">
+    <h2>批量导入</h2>
+    <p class="muted">每行一个，格式：<code>名称,BaseURL,APIKey</code> 或 <code>BaseURL,APIKey</code></p>
+    <textarea name="lines" rows="10" placeholder="接口A,https://aaa.lovable.app,sk-xxx
+接口B,https://bbb.lovable.app,sk-yyy"></textarea>
+    <div class="form-actions">
+      <button type="button" class="ghost" onclick="document.getElementById('batchDialog').close()">取消</button>
+      <button type="submit" class="primary">导入</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
