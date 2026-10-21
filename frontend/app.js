@@ -15,6 +15,23 @@ const state = {
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+/* ---------------------------------------------------------------- 主题 */
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem("pool_theme", theme);
+  const btn = $("#themeBtn");
+  if (btn) btn.textContent = theme === "light" ? "暗色" : "亮色";
+}
+
+function initTheme() {
+  const saved = localStorage.getItem("pool_theme");
+  const prefersLight = window.matchMedia?.("(prefers-color-scheme: light)").matches;
+  applyTheme(saved || (prefersLight ? "light" : "dark"));
+  $("#themeBtn").addEventListener("click", () => {
+    applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+  });
+}
+
 function toast(message, isError = false) {
   const el = $("#toast");
   el.textContent = message;
@@ -113,7 +130,13 @@ function renderTable(endpoints) {
           ${ep.notes ? `<div class="sub">${esc(ep.notes)}</div>` : ""}
         </td>
         <td class="url" title="${esc(ep.base_url)}">${esc(ep.base_url)}</td>
-        <td class="mono sub">${esc(ep.api_key_masked || "未设置")}</td>
+        <td class="mono sub">${
+          ep.has_key
+            ? esc(ep.api_key_masked || "未设置")
+            : ep.uses_default_key
+              ? '<span class="tag-default">默认密钥</span>'
+              : '未设置'
+        }</td>
         <td>${ep.total_requests} / ${ep.total_success}</td>
         <td>${rate}<div class="bar"><div style="width:${barW}%"></div></div></td>
         <td>${ep.last_latency_ms ? ep.last_latency_ms + "ms" : "—"}</td>
@@ -227,7 +250,9 @@ function openEditDialog(ep) {
     form.name.value = ep.name || "";
     form.base_url.value = ep.base_url || "";
     form.api_key.value = "";
-    form.api_key.placeholder = ep.has_key ? `已保存 ${ep.api_key_masked}，留空不修改` : "尚未设置";
+    form.api_key.placeholder = ep.has_key
+      ? `已保存 ${ep.api_key_masked}，留空不修改`
+      : "留空 = 用全局默认密钥";
     form.auth_header.value = ep.auth_header || "Authorization";
     form.auth_prefix.value = ep.auth_prefix ?? "Bearer ";
     form.model.value = ep.model || "";
@@ -301,10 +326,17 @@ async function loadSettings() {
   const s = await api("/api/settings");
   state.settings = s;
   const form = $("#settingsForm");
+  const skip = new Set(["has_default_api_key", "default_api_key_masked", "default_api_key", "clear_default_api_key"]);
   for (const key of Object.keys(s)) {
+    if (skip.has(key)) continue;
     const el = form.elements[key];
     if (el) el.value = s[key];
   }
+  form.default_api_key.value = "";
+  form.default_api_key.placeholder = s.has_default_api_key
+    ? `已保存 ${s.default_api_key_masked}，留空不修改`
+    : "未设置：填了即对所有没单独配 key 的接口生效";
+  form.clear_default_api_key.checked = false;
 }
 
 $("#settingsForm").addEventListener("submit", async (e) => {
@@ -314,11 +346,21 @@ $("#settingsForm").addEventListener("submit", async (e) => {
     "max_attempts", "request_timeout", "cooldown_quota", "cooldown_auth",
     "cooldown_rate", "cooldown_server", "probe_interval", "probe_timeout",
   ];
-  const patch = { strategy: form.strategy.value, probe_path: form.probe_path.value, quota_keywords: form.quota_keywords.value };
+  const patch = {
+    strategy: form.strategy.value,
+    probe_path: form.probe_path.value,
+    quota_keywords: form.quota_keywords.value,
+    default_auth_header: form.default_auth_header.value.trim() || "Authorization",
+    default_auth_prefix: form.default_auth_prefix.value,
+  };
   for (const key of numeric) patch[key] = Number(form.elements[key].value) || 0;
+  const newDefaultKey = form.default_api_key.value.trim();
+  if (newDefaultKey) patch.default_api_key = newDefaultKey;
+  if (form.clear_default_api_key.checked) patch.clear_default_api_key = true;
   try {
     await api("/api/settings", { method: "PUT", body: patch });
-    toast("设置已保存");
+    toast(newDefaultKey ? "设置与默认密钥已保存" : "设置已保存");
+    await loadSettings();
     refresh();
   } catch (err) {
     toast(String(err.message || err), true);
@@ -405,6 +447,7 @@ async function boot() {
 }
 
 (async function init() {
+  initTheme();
   $("#proxyBase").textContent = `${location.origin}/v1`;
   try {
     await api("/api/overview");

@@ -27,6 +27,8 @@ jobs:
       - run: pip install -r requirements.txt
       - name: 工作流自身静态检查（secrets-in-if / 空 images）
         run: python tests/check_workflow.py
+      - name: 前端静态检查（主题变量 / 设置控件 / 文案）
+        run: python tests/check_frontend.py
       - name: 编译检查
         run: python -m compileall -q backend
       - name: 号池换号逻辑冒烟（假上游）

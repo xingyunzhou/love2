@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>号池控制台 · Endpoint Pool</title>
 <link rel="stylesheet" href="style.css" />
+<script>
+  // 首屏前定主题，避免闪一下白底
+  document.documentElement.dataset.theme =
+    localStorage.getItem("pool_theme") ||
+    (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+</script>
 </head>
 <body>
 
@@ -30,6 +36,7 @@
     <button id="copyBtn" class="ghost">复制</button>
   </div>
   <div class="top-actions">
+    <button id="themeBtn" class="ghost" title="切换明暗">亮色</button>
     <button id="probeAllBtn" class="ghost">全部探活</button>
     <button id="batchBtn" class="ghost">批量导入</button>
     <button id="addBtn" class="primary">+ 添加接口</button>
@@ -102,6 +109,14 @@
       <label>自动探活间隔（秒，0 = 关闭）<input name="probe_interval" type="number" min="0" /></label>
       <label>探活超时（秒）<input name="probe_timeout" type="number" min="3" /></label>
 
+      <h2>全局默认 API Key</h2>
+      <label class="full">所有接口共用同一个 key 时填这里，加号时密钥留空即可
+        <input name="default_api_key" type="password" placeholder="留空 = 不修改" autocomplete="new-password" />
+      </label>
+      <label>默认鉴权头名<input name="default_auth_header" placeholder="Authorization" /></label>
+      <label>默认鉴权前缀<input name="default_auth_prefix" placeholder="Bearer " /></label>
+      <label class="check"><input name="clear_default_api_key" type="checkbox" /> 清空已保存的默认密钥</label>
+
       <h2>余额不足判定关键词</h2>
       <label class="full">逗号分隔，命中响应体就判定为余额/额度不足
         <textarea name="quota_keywords" rows="3"></textarea>
@@ -119,9 +134,9 @@
     <h2 id="epDialogTitle">添加接口</h2>
     <input type="hidden" name="id" />
     <label>名称<input name="name" placeholder="留空自动取域名" /></label>
-    <label>Base URL<input name="base_url" placeholder="https://xxx.lovable.app" required /></label>
+    <label>Base URL<input name="base_url" placeholder="https://api-a.example.com" required /></label>
     <label>API Key
-      <input name="api_key" placeholder="编辑时留空 = 不修改" autocomplete="off" />
+      <input name="api_key" placeholder="留空 = 用全局默认密钥" autocomplete="off" />
     </label>
     <label>鉴权头名<input name="auth_header" value="Authorization" /></label>
     <label>鉴权前缀<input name="auth_prefix" value="Bearer " /></label>
@@ -143,8 +158,9 @@
   <form id="batchForm" method="dialog">
     <h2>批量导入</h2>
     <p class="muted">每行一个，格式：<code>名称,BaseURL,APIKey</code> 或 <code>BaseURL,APIKey</code></p>
-    <textarea name="lines" rows="10" placeholder="接口A,https://aaa.lovable.app,sk-xxx
-接口B,https://bbb.lovable.app,sk-yyy"></textarea>
+    <textarea name="lines" rows="10" placeholder="接口A,https://api-a.example.com,sk-xxx
+接口B,https://api-b.example.com/v1,sk-yyy
+https://api-c.example.com"></textarea>
     <div class="form-actions">
       <button type="button" class="ghost" onclick="document.getElementById('batchDialog').close()">取消</button>
       <button type="submit" class="primary">导入</button>

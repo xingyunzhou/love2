@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import config, db, pool, proxy
-from .crypto import encrypt, mask
+from .crypto import decrypt, encrypt, mask
 
 ROOT = config.FRONTEND_DIR
 
@@ -79,12 +79,27 @@ class SettingsPatch(BaseModel):
     probe_interval: Optional[int] = None
     probe_timeout: Optional[int] = None
     quota_keywords: Optional[str] = None
+    default_api_key: Optional[str] = None
+    clear_default_api_key: Optional[bool] = None
+    default_auth_header: Optional[str] = None
+    default_auth_prefix: Optional[str] = None
 
 
 # ------------------------------------------------------------------ 序列化
+def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """设置回前端时抹掉默认密钥本体，只给掩码。"""
+    out = {k: v for k, v in settings.items() if k != "default_api_key_enc"}
+    raw = str(settings.get("default_api_key_enc") or "")
+    key = decrypt(raw) if raw else ""
+    out["has_default_api_key"] = bool(key)
+    out["default_api_key_masked"] = mask(key) if key else ""
+    return out
+
+
 def serialize(ep: dict[str, Any], now: Optional[float] = None) -> dict[str, Any]:
     now = now if now is not None else time.time()
-    plain = pool.secret(ep)
+    own = pool.own_secret(ep)
+    plain = own or pool.default_secret()
     status = pool.effective_status(ep, now)
     cooldown_left = max(0, int((ep.get("cooldown_until") or 0) - now))
     total = ep.get("total_requests") or 0
@@ -94,7 +109,8 @@ def serialize(ep: dict[str, Any], now: Optional[float] = None) -> dict[str, Any]
         "name": ep["name"],
         "base_url": ep["base_url"],
         "api_key_masked": mask(plain),
-        "has_key": bool(plain),
+        "has_key": bool(own),
+        "uses_default_key": (not own) and bool(plain),
         "auth_header": ep["auth_header"],
         "auth_prefix": ep["auth_prefix"],
         "model": ep["model"],
@@ -178,7 +194,7 @@ async def overview() -> dict[str, Any]:
                 max(1, sum(1 for e in items if e["last_latency_ms"])), 1
             ),
         },
-        "settings": db.get_settings(),
+        "settings": public_settings(db.get_settings()),
         "admin_token_required": bool(config.ADMIN_TOKEN),
         "proxy_token_required": bool(config.PROXY_TOKEN),
     }
@@ -302,19 +318,27 @@ async def probe_all() -> dict[str, Any]:
 
 @app.get("/api/settings", dependencies=[Depends(admin)])
 async def get_settings() -> dict[str, Any]:
-    return db.get_settings()
+    return public_settings(db.get_settings())
 
 
 @app.put("/api/settings", dependencies=[Depends(admin)])
 async def put_settings(body: SettingsPatch) -> dict[str, Any]:
-    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    data = body.model_dump(exclude_none=True)
+    patch = {k: v for k, v in data.items() if k not in ("default_api_key", "clear_default_api_key")}
     if "strategy" in patch and patch["strategy"] not in (
         "round_robin", "weighted", "least_used", "priority", "random"
     ):
         raise HTTPException(status_code=400, detail="未知策略")
+    if data.pop("clear_default_api_key", False):
+        patch["default_api_key_enc"] = ""
+        pool.log("warn", "admin", "已清空全局默认密钥")
+    new_key = (data.get("default_api_key") or "").strip()
+    if new_key:
+        patch["default_api_key_enc"] = encrypt(new_key)
+        pool.log("info", "admin", f"更新全局默认密钥 {mask(new_key)}")
     settings = db.set_settings(patch)
     pool.log("info", "admin", "更新设置")
-    return settings
+    return public_settings(settings)
 
 
 @app.get("/api/logs", dependencies=[Depends(admin)])

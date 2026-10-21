@@ -81,6 +81,10 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
         "exceeded your current quota,no credit,credit balance,payment required,"
         "billing,余额不足,额度不足,余额为0,欠费,账户异常,已用完"
     ),
+    # 全局默认密钥：很多池子所有接口共用同一个 key，加号时不用重复填
+    "default_api_key_enc": "",
+    "default_auth_header": "Authorization",
+    "default_auth_prefix": "Bearer ",
 }
 
 _ENDPOINT_COLUMNS = (

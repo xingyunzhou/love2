@@ -159,16 +159,33 @@ async def pick(exclude: Optional[set[int]] = None) -> Optional[dict[str, Any]]:
     return eps[_cursor]
 
 
+def own_secret(ep: dict[str, Any]) -> str:
+    return decrypt(ep.get("api_key_enc", "")) if ep.get("api_key_enc") else ""
+
+
+def default_secret() -> str:
+    raw = db.get_settings().get("default_api_key_enc") or ""
+    return decrypt(str(raw)) if raw else ""
+
+
 def secret(ep: dict[str, Any]) -> str:
-    return decrypt(ep.get("api_key_enc", ""))
+    """接口自己的 key 优先，没填就用全局默认 key。"""
+    return own_secret(ep) or default_secret()
 
 
 def auth_headers(ep: dict[str, Any]) -> dict[str, str]:
-    key = secret(ep)
+    own = own_secret(ep)
+    if own:
+        header = ep.get("auth_header") or "Authorization"
+        prefix = ep.get("auth_prefix") if ep.get("auth_prefix") is not None else "Bearer "
+        key = own
+    else:
+        settings = db.get_settings()
+        header = settings.get("default_auth_header") or "Authorization"
+        prefix = settings.get("default_auth_prefix") or ""
+        key = default_secret()
     if not key:
         return {}
-    header = ep.get("auth_header") or "Authorization"
-    prefix = ep.get("auth_prefix") or ""
     return {header: f"{prefix}{key}".strip()}
 
 

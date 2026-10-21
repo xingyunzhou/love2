@@ -143,7 +143,35 @@ def main() -> int:
             assert client.put("/api/settings", headers=H, json={"strategy": "nope"}).status_code == 400
             print("  设置校验: ok")
 
-            # 8) 日志已经记下换号过程
+            # 8) 全局默认密钥：设置一次，加号时留空即可
+            r = client.put("/api/settings", headers=H, json={"default_api_key": "sk-global-default"})
+            assert r.status_code == 200, r.text
+            assert r.json()["has_default_api_key"] is True
+            assert "sk-global" not in r.text, "设置接口不应回传默认密钥本体"
+            assert "default_api_key_enc" not in r.text
+
+            r = client.post("/api/endpoints", headers=H,
+                            json={"name": "no-key", "base_url": f"http://127.0.0.1:{PORTS[2]}"})
+            assert r.status_code == 200, r.text
+            nokey = r.json()
+            assert nokey["has_key"] is False and nokey["uses_default_key"] is True, nokey
+
+            client.post(f"/api/endpoints/{ids[2]}/toggle", headers=H)  # 停掉 alive，只留 no-key
+            r = client.post("/v1/chat/completions", json=payload)
+            assert r.status_code == 200, r.text
+            assert r.json()["served_by_key"] == "sk-global-default", r.text
+            print("  全局默认密钥生效: ok")
+
+            r = client.post(f"/api/endpoints/{nokey['id']}/probe", headers=H)
+            assert r.status_code == 200 and r.json()["ok"] is True, r.text
+            client.post(f"/api/endpoints/{ids[2]}/toggle", headers=H)  # 恢复 alive
+            client.delete(f"/api/endpoints/{nokey['id']}", headers=H)
+
+            r = client.put("/api/settings", headers=H, json={"clear_default_api_key": True}).json()
+            assert r["has_default_api_key"] is False, r
+            print("  默认密钥可清空: ok")
+
+            # 9) 日志已经记下换号过程
             logs = client.get("/api/logs?limit=80", headers=H).json()["logs"]
             kinds = {l["kind"] for l in logs}
             assert {"quota", "auth"} <= kinds, kinds

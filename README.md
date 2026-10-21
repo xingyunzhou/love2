@@ -1,13 +1,15 @@
 # 号池控制台 · Endpoint Pool
 
-把多个 OpenAI 兼容接口（比如你手上那批 `*.lovable.app` 代理站）收进一个池子：
+把多个 OpenAI 兼容接口（各家代理站、中转站、自建网关都行）收进一个池子：
 **对外只暴露一个地址，内部自动轮询，谁余额不足 / 报错 / 失联就自动切下一个，冷却到期自动复活，前端随时加号。**
 
 - 一个 `/v1/...` 入口，客户端只认一个 base_url
 - 轮询 / 加权 / 最少使用 / 优先级 / 随机 五种选号策略
 - 402、401/403、429、5xx、超时、响应体命中「余额不足」关键词 → 立刻换号 + 冷却
 - 冷却中的号会被剔除；自动探活通过后自动放回池子
+- 全局默认 API Key：所有接口共用同一个 key 时只填一次，加号时密钥留空即可
 - 可视化面板：加、改、删、启停、单号探活、批量导入、实时路由日志、策略与冷却参数热改
+- 明 / 暗两套皮肤，右上角随时切换，记住选择（首次跟随系统）
 - 密钥 Fernet 加密落库，前端只显示掩码
 - Docker 一键跑，GitHub Actions 自动多架构构建推镜像
 - 无前端构建步骤（原生 JS），镜像里只有 Python
@@ -97,21 +99,33 @@ python tests/run_smoke.py         # 可选：跑一遍换号逻辑验证
 
 ```
 名称,BaseURL,APIKey
-接口A,https://aaa.lovable.app,sk-xxx
-接口B,https://bbb.lovable.app,sk-yyy
-https://ccc.lovable.app,sk-zzz
+接口A,https://api-a.example.com,sk-xxx
+接口B,https://api-b.example.com/v1,sk-yyy
+https://api-c.example.com
 ```
+
+第三行只给地址也行——**密钥留空就走「设置 → 全局默认 API Key」**。
 
 字段说明：
 
 | 字段 | 说明 |
 |---|---|
-| Base URL | 上游根地址，`https://x.lovable.app` 或 `https://x.lovable.app/v1` 都行，不会拼出 `/v1/v1` |
-| API Key | 加密入库；编辑时留空 = 不修改 |
+| Base URL | 上游根地址，`https://api-a.example.com` 或 `https://api-a.example.com/v1` 都行，不会拼出 `/v1/v1` |
+| API Key | 留空 = 用全局默认密钥；填了就加密入库，只显示掩码，编辑时留空 = 不修改 |
 | 鉴权头名 / 前缀 | 默认 `Authorization` + `Bearer `，遇到自定义鉴权的站改成 `x-api-key` / 空前缀 |
 | 强制模型 | 填了就覆盖请求体里的 `model`（各站模型名不一致时好用）；留空则透传 |
 | 权重 | 「加权轮询」策略下的命中比例 |
 | 优先级 | 「优先级」策略下只在高优先级组里轮询 |
+
+### 全局默认 API Key
+
+手上这把 key 在所有接口上通用时，别一个个填：
+
+1. 设置 → 全局默认 API Key → 粘贴 key → 保存（加密存库，界面只回掩码）
+2. 之后添加接口，API Key 那栏留空即可，表格里该行密钥处显示「默认密钥」
+3. 改默认 key，所有用默认的接口一起生效；个别站要单独 key 的，就在该接口里单独填，接口自己的 key 优先
+
+「默认鉴权头名 / 前缀」同样作用于用默认 key 的接口。要清掉默认 key，勾选「清空已保存的默认密钥」再保存。
 
 ### 客户端怎么连
 
@@ -154,6 +168,7 @@ print(client.chat.completions.create(
 | 启停 | 停用后立刻退出轮询，保留统计 |
 | 重置 | 清掉冷却和最近错误；`counters=true` 连统计一起清 |
 | 实时日志 | 每条路由决策：命中谁、状态码、耗时、为什么换号 |
+| 亮色 / 暗色 | 右上角切换皮肤，写进 localStorage；首次访问跟随系统 `prefers-color-scheme` |
 
 ---
 
@@ -182,7 +197,9 @@ print(client.chat.completions.create(
 ## 自测
 
 ```bash
-python tests/run_smoke.py
+python tests/run_smoke.py        # 端到端：假上游 + TestClient
+python tests/check_frontend.py   # 明暗主题变量 / 设置控件 / 文案无残留域名
+python tests/check_workflow.py   # 工作流里没有 secrets-in-if、没有空 images
 ```
 
-起三个假上游（分别返回 402 余额不足 / 401 鉴权失败 / 200 正常），验证：轮询命中、坏号冷却、后续请求跳过冷却号、5xx 与 429 换号、探活恢复、`base_url` 带 `/v1` 不重复拼接、设置校验、日志落库、静态前端可访问、删除。
+`run_smoke.py` 起三个假上游（分别返回 402 余额不足 / 401 鉴权失败 / 200 正常），验证：轮询命中、坏号冷却、后续请求跳过冷却号、5xx 与 429 换号、探活恢复、`base_url` 带 `/v1` 不重复拼接、全局默认密钥生效与清空、设置校验、日志落库、静态前端可访问、删除。三个脚本都已挂进 CI 的 smoke job。
