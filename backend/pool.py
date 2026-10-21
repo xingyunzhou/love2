@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import random
 import time
 from typing import Any, Optional
@@ -129,7 +130,31 @@ def report_failure(ep: dict[str, Any], kind: str, message: str, retryable: bool 
 
 
 # ------------------------------------------------------------------ 选号
-async def pick(exclude: Optional[set[int]] = None) -> Optional[dict[str, Any]]:
+def _hash64(text: str) -> int:
+    return int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "big")
+
+
+def _ring(eps: list[dict[str, Any]], vnodes: int = 64) -> list[tuple[int, int]]:
+    ring = [(_hash64(f"{ep['id']}#{i}"), ep["id"]) for ep in eps for i in range(vnodes)]
+    ring.sort()
+    return ring
+
+
+def _ring_pick(eps: list[dict[str, Any]], key: str) -> Optional[dict[str, Any]]:
+    """一致性哈希：同一个 key 落到同一个接口，增删号只搬 1/N 的会话。"""
+    if not eps:
+        return None
+    by_id = {ep["id"]: ep for ep in eps}
+    ring = _ring(eps)
+    h = _hash64(key)
+    for rh, eid in ring:
+        if rh >= h:
+            return by_id[eid]
+    return by_id[ring[0][1]]
+
+
+async def pick(exclude: Optional[set[int]] = None,
+               session_key: Optional[str] = None) -> Optional[dict[str, Any]]:
     global _cursor
     exclude = exclude or set()
     now = time.time()
@@ -140,6 +165,8 @@ async def pick(exclude: Optional[set[int]] = None) -> Optional[dict[str, Any]]:
     settings = db.get_settings()
     strategy = settings.get("strategy", "round_robin")
 
+    if strategy == "sticky":
+        return _pick_sticky(eps, session_key, settings)
     if strategy == "random":
         return random.choice(eps)
     if strategy == "least_used":
@@ -157,6 +184,28 @@ async def pick(exclude: Optional[set[int]] = None) -> Optional[dict[str, Any]]:
     # round_robin / priority 内部轮询
     _cursor = (_cursor + 1) % len(eps)
     return eps[_cursor]
+
+
+def _pick_sticky(eps: list[dict[str, Any]], session_key: Optional[str],
+                 settings: dict[str, Any]) -> dict[str, Any]:
+    """粘性路由：会话表优先，表里没有就一致性哈希定一个，顺手记下。"""
+    key = session_key or "shared"
+    ttl = int(settings.get("sticky_ttl") or 0)
+    target: Optional[dict[str, Any]] = None
+    if session_key and ttl > 0:
+        row = db.get_affinity(session_key)
+        if row and (time.time() - float(row["updated_at"])) <= ttl:
+            target = next((e for e in eps if e["id"] == row["endpoint_id"]), None)
+            if target is not None:
+                db.touch_affinity(session_key, target["id"])
+                return target
+    picked = _ring_pick(eps, key) or eps[0]
+    if str(settings.get("sticky_spread") or "hash") == "least_used":
+        # 新会话按当前请求量挑最闲的号；已经有家的会话不受影响，不会来回跳
+        picked = min(eps, key=lambda e: (e["total_requests"], e["id"]))
+    if session_key:
+        db.touch_affinity(session_key, picked["id"])
+    return picked
 
 
 def own_secret(ep: dict[str, Any]) -> str:
@@ -243,6 +292,9 @@ async def auto_probe_loop(stop: asyncio.Event) -> None:
     while not stop.is_set():
         settings = db.get_settings()
         interval = int(settings.get("probe_interval") or 0)
+        ttl = int(settings.get("sticky_ttl") or 0)
+        if ttl > 0:
+            db.prune_affinity(ttl * 2)  # 过期的会话粘性清掉，别让表长毛
         if interval <= 0:
             sleep_for = 30
         else:

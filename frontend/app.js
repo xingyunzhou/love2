@@ -109,6 +109,7 @@ function renderStats(stats) {
     { label: "成功", value: stats.success, cls: "ok" },
     { label: "失败", value: stats.fail, cls: stats.fail ? "err" : "" },
     { label: "平均延迟", value: `${stats.avg_latency_ms}ms`, cls: "" },
+    { label: "粘性会话", value: stats.sticky_sessions ?? 0, cls: "" },
   ];
   $("#stats").innerHTML = cards
     .map((c) => `<div class="stat ${c.cls}"><b>${esc(c.value)}</b><span>${esc(c.label)}</span></div>`)

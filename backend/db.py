@@ -62,6 +62,15 @@ CREATE TABLE IF NOT EXISTS logs (
     latency_ms    REAL
 );
 
+-- 会话粘性：同一个请求前缀永远落到同一个接口，命中的是上游的 prompt 缓存
+CREATE TABLE IF NOT EXISTS affinity (
+    session_key TEXT PRIMARY KEY,
+    endpoint_id INTEGER NOT NULL,
+    updated_at  REAL    NOT NULL,
+    hits        INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_affinity_updated ON affinity(updated_at);
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts);
 """
 
@@ -85,6 +94,11 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "default_api_key_enc": "",
     "default_auth_header": "Authorization",
     "default_auth_prefix": "Bearer ",
+    # 粘性路由：同一会话/同一前缀固定走同一个接口，吃满上游 prompt 缓存
+    "sticky_ttl": 1800,
+    "sticky_header": "x-session-id",
+    # 新会话怎么挑号：hash = 一致性哈希（稳定），least_used = 按当前请求量挑最闲的
+    "sticky_spread": "hash",
 }
 
 _ENDPOINT_COLUMNS = (
@@ -273,6 +287,37 @@ def reset_counters(endpoint_id: int) -> None:
         "last_latency_ms=0 WHERE endpoint_id = ?",
         (endpoint_id,),
     )
+
+
+# ---------------------------------------------------------------- 会话粘性
+def get_affinity(session_key: str) -> Optional[dict[str, Any]]:
+    return one("SELECT session_key, endpoint_id, updated_at, hits FROM affinity WHERE session_key = ?",
+               (session_key,))
+
+
+def touch_affinity(session_key: str, endpoint_id: int) -> None:
+    now = time.time()
+    row = one("SELECT endpoint_id, hits FROM affinity WHERE session_key = ?", (session_key,))
+    if row is None:
+        run("INSERT INTO affinity(session_key, endpoint_id, updated_at, hits) VALUES(?,?,?,1)",
+            (session_key, endpoint_id, now))
+        return
+    hits = (row["hits"] + 1) if row["endpoint_id"] == endpoint_id else 1
+    run("UPDATE affinity SET endpoint_id=?, updated_at=?, hits=? WHERE session_key=?",
+        (endpoint_id, now, hits, session_key))
+
+
+def prune_affinity(ttl: float) -> None:
+    run("DELETE FROM affinity WHERE updated_at < ?", (time.time() - ttl,))
+
+
+def drop_affinity_for_endpoint(endpoint_id: int) -> None:
+    run("DELETE FROM affinity WHERE endpoint_id = ?", (endpoint_id,))
+
+
+def count_affinity() -> int:
+    row = one("SELECT COUNT(*) AS c FROM affinity")
+    return int(row["c"]) if row else 0
 
 
 # -------------------------------------------------------------------- logs

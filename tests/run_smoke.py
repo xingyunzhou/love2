@@ -185,6 +185,54 @@ def main() -> int:
             assert client.get("/style.css").status_code == 200
             print("  静态前端: ok")
 
+            # 9.5) 粘性路由：同一会话固定命中同一接口（上游 prompt 缓存才可能命中）
+            client.post(f"/api/endpoints/{ids[0]}/toggle", headers=H)  # 停掉 dead-quota，池里只留两个活号
+            r = client.post("/api/endpoints", headers=H,
+                            json={"name": "sticky-b", "base_url": f"http://127.0.0.1:{PORTS[1]}",
+                                  "api_key": "sk-sticky-b"})
+            sticky_b = r.json()["id"]
+            client.put("/api/settings", headers=H, json={"strategy": "sticky", "sticky_ttl": 600})
+
+            def call(sid=None, body=None):
+                headers = {"x-session-id": sid} if sid else {}
+                res = client.post("/v1/chat/completions", json=body or payload, headers=headers)
+                assert res.status_code == 200, res.text
+                return res.json()["served_by_key"]
+
+            first = call("conv-1")
+            for _ in range(4):
+                assert call("conv-1") == first, "同一会话被拆到了不同接口"
+            heads = {call(f"conv-{i}") for i in range(6)}
+            assert len(heads) <= 2, heads
+
+            # 不带 session 头时用「system + 首条用户消息」的前缀哈希，同一个前缀也要粘住
+            body_a = {"model": "m", "messages": [
+                {"role": "system", "content": "你是运维助手，回答保持简短。"},
+                {"role": "user", "content": "第一问"},
+            ]}
+            body_b = {"model": "m", "messages": [
+                {"role": "system", "content": "你是运维助手，回答保持简短。"},
+                {"role": "user", "content": "第一问"},
+                {"role": "assistant", "content": "答"},
+                {"role": "user", "content": "第二问"},
+            ]}
+            a1 = call(body=body_a)
+            assert call(body=body_a) == a1
+            assert call(body=body_b) == a1, "同一前缀追加消息后应继续命中同一接口"
+            assert client.get("/api/overview", headers=H).json()["stats"]["sticky_sessions"] >= 2
+            print(f"  粘性路由: 会话固定命中 {first}，前缀粘性 ok")
+
+            # 新会话挑号方式可切
+            s = client.put("/api/settings", headers=H, json={"sticky_spread": "least_used"}).json()
+            assert s["sticky_spread"] == "least_used", s
+            assert call("conv-least-used") in ("sk-alive", "sk-sticky-b")
+            assert client.put("/api/settings", headers=H, json={"sticky_spread": "nope"}).status_code == 400
+            client.put("/api/settings", headers=H, json={"sticky_spread": "hash"})
+            print("  新会话挑号方式可切: ok")
+
+            client.delete(f"/api/endpoints/{sticky_b}", headers=H)
+            client.put("/api/settings", headers=H, json={"strategy": "round_robin"})
+
             # 10) 删除
             assert client.delete(f"/api/endpoints/{ids[0]}", headers=H).status_code == 200
             assert client.get("/api/overview", headers=H).json()["stats"]["total"] == 4

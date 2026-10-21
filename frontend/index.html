@@ -89,6 +89,7 @@
       <label>选号策略
         <select name="strategy">
           <option value="round_robin">轮询 round_robin</option>
+          <option value="sticky">粘性 sticky（缓存命中优先）</option>
           <option value="weighted">加权轮询 weighted</option>
           <option value="least_used">最少使用 least_used</option>
           <option value="priority">优先级 priority</option>
@@ -97,6 +98,16 @@
       </label>
       <label>单次请求最多换号次数<input name="max_attempts" type="number" min="1" max="20" /></label>
       <label>请求超时（秒）<input name="request_timeout" type="number" min="5" max="3600" /></label>
+
+      <h2>粘性路由（缓存命中）</h2>
+      <label>会话保持时长（秒，0 = 关闭）<input name="sticky_ttl" type="number" min="0" /></label>
+      <label>会话标识请求头<input name="sticky_header" placeholder="x-session-id" /></label>
+      <label>新会话挑号方式
+        <select name="sticky_spread">
+          <option value="hash">一致性哈希 hash（稳定，分配不保证均摊）</option>
+          <option value="least_used">最闲优先 least_used（均摊更好）</option>
+        </select>
+      </label>
 
       <h2>冷却时间（秒）</h2>
       <label>余额/额度不足<input name="cooldown_quota" type="number" min="0" /></label>

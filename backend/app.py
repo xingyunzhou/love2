@@ -83,6 +83,9 @@ class SettingsPatch(BaseModel):
     clear_default_api_key: Optional[bool] = None
     default_auth_header: Optional[str] = None
     default_auth_prefix: Optional[str] = None
+    sticky_ttl: Optional[int] = None
+    sticky_header: Optional[str] = None
+    sticky_spread: Optional[str] = None
 
 
 # ------------------------------------------------------------------ 序列化
@@ -193,6 +196,7 @@ async def overview() -> dict[str, Any]:
                 sum(e["last_latency_ms"] for e in items if e["last_latency_ms"]) /
                 max(1, sum(1 for e in items if e["last_latency_ms"])), 1
             ),
+            "sticky_sessions": db.count_affinity(),
         },
         "settings": public_settings(db.get_settings()),
         "admin_token_required": bool(config.ADMIN_TOKEN),
@@ -280,6 +284,7 @@ async def update_endpoint(endpoint_id: int, body: EndpointPatch) -> dict[str, An
 async def delete_endpoint(endpoint_id: int) -> dict[str, Any]:
     ep = endpoint_or_404(endpoint_id)
     db.delete_endpoint(endpoint_id)
+    db.drop_affinity_for_endpoint(endpoint_id)
     pool.log("warn", "admin", f"删除接口: {ep['name']}")
     return {"deleted": endpoint_id}
 
@@ -326,9 +331,11 @@ async def put_settings(body: SettingsPatch) -> dict[str, Any]:
     data = body.model_dump(exclude_none=True)
     patch = {k: v for k, v in data.items() if k not in ("default_api_key", "clear_default_api_key")}
     if "strategy" in patch and patch["strategy"] not in (
-        "round_robin", "weighted", "least_used", "priority", "random"
+        "round_robin", "weighted", "least_used", "priority", "random", "sticky"
     ):
         raise HTTPException(status_code=400, detail="未知策略")
+    if "sticky_spread" in patch and patch["sticky_spread"] not in ("hash", "least_used"):
+        raise HTTPException(status_code=400, detail="sticky_spread 只能是 hash 或 least_used")
     if data.pop("clear_default_api_key", False):
         patch["default_api_key_enc"] = ""
         pool.log("warn", "admin", "已清空全局默认密钥")

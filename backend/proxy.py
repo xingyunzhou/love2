@@ -2,6 +2,7 @@
 # 统一入口：把 /v1/*、/proxy/* 的请求投给号池里选中的接口，失败自动换号重试
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from typing import Any, Optional
@@ -17,7 +18,7 @@ from . import db, pool
 HOP_BY_HOP = {
     "host", "content-length", "connection", "keep-alive", "proxy-authenticate",
     "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
-    "accept-encoding", "x-admin-token", "x-proxy-token",
+    "accept-encoding", "x-admin-token", "x-proxy-token", "x-session-id",
 }
 
 DROP_FROM_RESPONSE = {
@@ -35,14 +36,78 @@ def join_url(base: str, path: str) -> str:
     return f"{b}/{p}"
 
 
-def build_headers(request: Request, ep: dict[str, Any]) -> dict[str, str]:
+def build_headers(request: Request, ep: dict[str, Any], sticky_header: str = "") -> dict[str, str]:
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP}
     auth_name = (ep.get("auth_header") or "Authorization")
+    drop = {"authorization", auth_name.lower()}
+    if sticky_header:
+        drop.add(sticky_header.lower())
     for key in list(headers):
-        if key.lower() in (auth_name.lower(), "authorization"):
+        if key.lower() in drop:
             headers.pop(key)
     headers.update(pool.auth_headers(ep))
     return headers
+
+
+def _content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):  # 多段 content
+        return "\n".join(
+            str(p.get("text", "")) for p in value if isinstance(p, dict)
+        )
+    return str(value or "")
+
+
+def derive_session_key(request: Request, body: bytes, header_name: str) -> str:
+    """决定「同一个会话」是谁：请求头 > user 字段 > metadata > 请求前缀哈希 > IP+UA。
+
+    前缀哈希只取 system/developer 段 + 第一条用户消息，所以对话往下长、key 不变——
+    这正好对应上游 prompt 缓存的匹配方式（前缀一致即命中）。
+    """
+    if header_name:
+        explicit = request.headers.get(header_name)
+        if explicit and explicit.strip():
+            return "sid:" + explicit.strip()[:200]
+
+    payload: Any = None
+    if body:
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = None
+
+    if isinstance(payload, dict):
+        for field in ("user", "session_id"):
+            value = payload.get(field)
+            if isinstance(value, (str, int)) and str(value).strip():
+                return f"{field}:" + str(value).strip()[:200]
+        meta = payload.get("metadata")
+        if isinstance(meta, dict):
+            for field in ("user_id", "session_id", "conversation_id"):
+                value = meta.get(field)
+                if isinstance(value, (str, int)) and str(value).strip():
+                    return f"meta:{field}:" + str(value).strip()[:200]
+
+        messages = payload.get("messages") or payload.get("input")
+        if isinstance(messages, list) and messages:
+            head: list[str] = []
+            for msg in messages:
+                if not isinstance(msg, dict):
+                    continue
+                head.append(f"{msg.get('role', '')}:{_content_text(msg.get('content'))[:4000]}")
+                if msg.get("role") not in ("system", "developer"):
+                    break
+            if head:
+                material = f"{payload.get('model', '')}\n" + "\n".join(head)
+                return "prefix:" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+        if body:
+            return "body:" + hashlib.sha256(body[:8000]).hexdigest()[:32]
+
+    client = request.client.host if request.client else ""
+    agent = request.headers.get("user-agent", "")
+    return "ip:" + hashlib.sha256(f"{client}|{agent}".encode()).hexdigest()[:32]
 
 
 def apply_model_override(body: bytes, ep: dict[str, Any]) -> bytes:
@@ -76,6 +141,8 @@ async def handle(request: Request, path: str) -> Response:
     body = await request.body()
     params = list(request.query_params.multi_items())
     method = request.method
+    sticky_header = str(settings.get("sticky_header") or "x-session-id")
+    session_key = derive_session_key(request, body, sticky_header)
 
     tried: set[int] = set()
     trace: list[dict[str, Any]] = []
@@ -84,12 +151,12 @@ async def handle(request: Request, path: str) -> Response:
 
     try:
         for attempt in range(1, attempts + 1):
-            ep = await pool.pick(exclude=tried)
+            ep = await pool.pick(exclude=tried, session_key=session_key)
             if ep is None:
                 break
             tried.add(ep["id"])
             url = join_url(ep["base_url"], path)
-            headers = build_headers(request, ep)
+            headers = build_headers(request, ep, sticky_header)
             payload = apply_model_override(body, ep)
             started = time.perf_counter()
 
