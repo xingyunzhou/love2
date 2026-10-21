@@ -81,7 +81,10 @@ python tests/run_smoke.py         # 可选：跑一遍换号逻辑验证
 | 手动 | Actions 页面 `Run workflow` |
 
 - 用内置 `GITHUB_TOKEN` 推 GHCR，**不需要额外配 secret**；包默认私有，第一次用完在仓库 Packages 里把可见性改成 public，或在部署机上 `docker login ghcr.io`。
-- 想同时推 Docker Hub：仓库 Settings → Secrets 加 `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`，工作流会自动加一条 `docker.io/<用户名>/endpoint-pool`，没配就跳过。
+- 想同时推 Docker Hub：仓库 Settings → Secrets 加 `DOCKERHUB_USERNAME`、`DOCKERHUB_TOKEN`，工作流会多跑一步推 `docker.io/<用户名>/endpoint-pool`，没配自动跳过。
+- 两个已踩过的坑（`python tests/check_workflow.py` 会拦）：
+  - `if:` 里不能写 `secrets.*` —— if 条件不提供 secrets 上下文，GitHub 直接报 `Unrecognized named-value: 'secrets'`，包不包 `${{ }}` 都一样。正确做法是先落到 `env`，再判断 `env.DOCKERHUB_USER != ''`。
+  - `metadata-action` 的 `images:` 里别放 `&&`/`||` 条件——secret 没配时会拼出空行，报 invalid reference。改成单独一步推送 Docker Hub。
 - 改了代码直接 push，GitHub 那边编完，服务器上 `docker compose pull && docker compose up -d` 就是新版；想全自动可以在服务器加个 watchtower 或 webhook。
 
 ---
