@@ -90,7 +90,6 @@ class SettingsPatch(BaseModel):
     log_keep_hours: Optional[int] = None
     affinity_max: Optional[int] = None
     disable_on_quota: Optional[bool] = None
-    auto_revive: Optional[bool] = None
 
 
 # ------------------------------------------------------------------ 序列化

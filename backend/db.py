@@ -104,9 +104,8 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "log_keep": int(LOG_KEEP),
     "log_keep_hours": 168,
     "affinity_max": 20000,
-    # 402 / 余额不足 → 直接停用该接口（不是冷却），并允许探活确认恢复后自动启用
+    # 402 / 余额不足 → 直接停用该接口（不是冷却）；停用后不再自动探活，启用与否由人决定
     "disable_on_quota": True,
-    "auto_revive": True,
 }
 
 _ENDPOINT_COLUMNS = (
@@ -153,6 +152,9 @@ def _migrate(c: sqlite3.Connection) -> None:
     if "auto_disabled" not in cols:
         c.execute("ALTER TABLE endpoint_state ADD COLUMN auto_disabled INTEGER NOT NULL DEFAULT 0")
         c.commit()
+    # 废弃的设置项清掉，免得 get_settings 把它们又带出来
+    c.execute("DELETE FROM settings WHERE key IN ('auto_revive')")
+    c.commit()
 
 
 def init() -> None:
