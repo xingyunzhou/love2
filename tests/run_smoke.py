@@ -96,17 +96,22 @@ def main() -> int:
                   f"{by_name['dead-quota']['last_error'][:50]}")
             print(f"  401 → 冷却: dead-auth {by_name['dead-auth']['cooldown_left']}s")
 
-            # 3.5) 停用的号不参与路由；换 key + 探活通过后自动复活
+            # 3.5) 停用的号：不参与路由、不参与批量探活、探活成功也不自己启用
             r = client.put(f"/api/endpoints/{ids[0]}", headers=H, json={"api_key": "sk-recovered"})
             assert r.json()["enabled"] is False, "改 key 不该顺手启用"
-            r = client.post(f"/api/endpoints/{ids[0]}/probe", headers=H)
-            assert r.json()["ok"] is True, r.text
-            revived = next(e for e in client.get("/api/overview", headers=H).json()["endpoints"]
-                           if e["id"] == ids[0])
-            assert revived["enabled"] is True and revived["auto_disabled"] is False, revived
-            print("  探活通过 → 自动重新启用: ok")
 
-            # 还原成坏 key 并人工停用，让后面的轮询断言保持确定
+            r = client.post("/api/endpoints/%d/probe" % ids[0], headers=H)
+            assert r.json()["ok"] is True, r.text
+            after_probe = next(e for e in client.get("/api/overview", headers=H).json()["endpoints"]
+                               if e["id"] == ids[0])
+            assert after_probe["enabled"] is False, "停用的号探活成功也不能自动启用"
+            assert after_probe["auto_disabled"] is True, after_probe
+
+            probed = {x["id"] for x in client.post("/api/probe-all", headers=H).json()["results"]}
+            assert ids[0] not in probed, "全部探活不该碰停用的号"
+            print("  停用号不路由 / 不批量探活 / 探活不自动启用: ok")
+
+            # 还原成坏 key 并保持停用，让后面的轮询断言保持确定
             client.put(f"/api/endpoints/{ids[0]}", headers=H,
                        json={"api_key": "sk-quota", "enabled": False})
 

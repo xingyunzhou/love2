@@ -375,7 +375,6 @@ $("#settingsForm").addEventListener("submit", async (e) => {
     default_auth_prefix: form.default_auth_prefix.value,
     sticky_spread: form.sticky_spread ? form.sticky_spread.value : undefined,
     disable_on_quota: form.disable_on_quota.checked,
-    auto_revive: form.auto_revive.checked,
   };
   for (const key of numeric) patch[key] = Number(form.elements[key].value) || 0;
   const newDefaultKey = form.default_api_key.value.trim();

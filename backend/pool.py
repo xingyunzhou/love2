@@ -267,10 +267,11 @@ async def probe(ep: dict[str, Any]) -> dict[str, Any]:
 
     if resp.status_code < 400:
         report_success(ep, latency)
-        if not ep.get("enabled") and ep.get("auto_disabled") and settings.get("auto_revive", True):
-            db.set_enabled(ep["id"], True, 0)
-            log("info", "probe", f"探活通过，自动重新启用 {ep['name']}", ep, latency)
-        log("info", "probe", f"探活成功 {resp.status_code} · {latency:.0f}ms", ep, latency)
+        if ep.get("enabled"):
+            log("info", "probe", f"探活成功 {resp.status_code} · {latency:.0f}ms", ep, latency)
+        else:
+            # 停用的号只回报结果，绝不因为探测成功就自己启用——启用是人的决定
+            log("info", "probe", f"探活成功 {resp.status_code} · {latency:.0f}ms（已停用，保持停用）", ep, latency)
         return {"ok": True, "status": resp.status_code, "latency_ms": round(latency, 1), "error": ""}
 
     kind, retryable = classify(resp.status_code, resp.content, settings)
@@ -287,17 +288,18 @@ async def probe(ep: dict[str, Any]) -> dict[str, Any]:
 
 
 async def probe_all() -> list[dict[str, Any]]:
+    """全部探活只打池子里在用的号；停用的号不碰（要单独确认就点该行的探活）。"""
     out = []
     for ep in db.list_endpoints():
-        if not ep["enabled"] and not ep.get("auto_disabled"):
-            continue  # 手动停用的不探；系统因欠费停用的要探，通了才能自己活过来
+        if not ep["enabled"]:
+            continue
         result = await probe(ep)
         out.append({"id": ep["id"], "name": ep["name"], **result})
     return out
 
 
 async def auto_probe_loop(stop: asyncio.Event) -> None:
-    """周期性探活：冷却中的号等恢复，因欠费被自动停用的号也探（通了自动启用）。"""
+    """周期性探活：只探「启用中且冷却」的号，等它恢复。停用的号一律不碰。"""
     while not stop.is_set():
         settings = db.get_settings()
         interval = int(settings.get("probe_interval") or 0)
@@ -308,11 +310,8 @@ async def auto_probe_loop(stop: asyncio.Event) -> None:
             sleep_for = 30
         else:
             now = time.time()
-            revive = bool(settings.get("auto_revive", True))
             for ep in db.list_endpoints():
-                cooling = ep["enabled"] and effective_status(ep, now) == "cooling"
-                killed = (not ep["enabled"]) and bool(ep.get("auto_disabled")) and revive
-                if cooling or killed:
+                if ep["enabled"] and effective_status(ep, now) == "cooling":
                     await probe(ep)
             sleep_for = max(interval, 15)
         try:
