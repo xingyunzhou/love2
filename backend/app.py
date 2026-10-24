@@ -89,6 +89,8 @@ class SettingsPatch(BaseModel):
     log_keep: Optional[int] = None
     log_keep_hours: Optional[int] = None
     affinity_max: Optional[int] = None
+    disable_on_quota: Optional[bool] = None
+    auto_revive: Optional[bool] = None
 
 
 # ------------------------------------------------------------------ 序列化
@@ -123,6 +125,7 @@ def serialize(ep: dict[str, Any], now: Optional[float] = None) -> dict[str, Any]
         "weight": ep["weight"],
         "priority": ep["priority"],
         "enabled": bool(ep["enabled"]),
+        "auto_disabled": bool(ep.get("auto_disabled") or 0),
         "notes": ep["notes"],
         "status": status,
         "cooldown_left": cooldown_left,
@@ -303,12 +306,12 @@ async def update_endpoint(endpoint_id: int, body: EndpointPatch) -> dict[str, An
     if body.priority is not None:
         patch["priority"] = body.priority
     if body.enabled is not None:
-        patch["enabled"] = 1 if body.enabled else 0
+        db.set_enabled(endpoint_id, body.enabled, 0)  # 人工开关，清掉自动停用标记
+        if body.enabled:
+            db.reset_state(endpoint_id)
     if body.api_key is not None and body.api_key.strip():
         patch["api_key_enc"] = encrypt(body.api_key.strip())
     db.update_endpoint(endpoint_id, patch)
-    if "enabled" in patch and patch["enabled"] == 1:
-        db.reset_state(endpoint_id)
     pool.log("info", "admin", f"更新接口: {ep['name']}")
     return serialize(endpoint_or_404(endpoint_id))
 
@@ -325,8 +328,8 @@ async def delete_endpoint(endpoint_id: int) -> dict[str, Any]:
 @app.post("/api/endpoints/{endpoint_id}/toggle", dependencies=[Depends(admin)])
 async def toggle_endpoint(endpoint_id: int) -> dict[str, Any]:
     ep = endpoint_or_404(endpoint_id)
-    enable = 0 if ep["enabled"] else 1
-    db.update_endpoint(endpoint_id, {"enabled": enable})
+    enable = not bool(ep["enabled"])
+    db.set_enabled(endpoint_id, enable, 0)
     if enable:
         db.reset_state(endpoint_id)
     pool.log("info", "admin", f"{'启用' if enable else '停用'}接口: {ep['name']}")
@@ -337,6 +340,7 @@ async def toggle_endpoint(endpoint_id: int) -> dict[str, Any]:
 async def reset_endpoint(endpoint_id: int, counters: bool = Query(default=False)) -> dict[str, Any]:
     ep = endpoint_or_404(endpoint_id)
     db.reset_state(endpoint_id)
+    db.set_enabled(endpoint_id, True, 0)  # 重置 = 人工确认复活，顺带解除自动停用
     if counters:
         db.reset_counters(endpoint_id)
     pool.log("info", "admin", f"重置状态: {ep['name']}")

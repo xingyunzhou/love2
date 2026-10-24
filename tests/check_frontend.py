@@ -60,6 +60,16 @@ hits = [b for b in banned if b in HTML or b in CSS or b in JS
 if hits:
     problems.append(f"文案里仍有具体域名: {hits}")
 
+# 停用状态必须是红底白字，且 402 自动停用要能和人工停用区分开
+disabled_block = css_block(".pill.disabled")
+if "background: var(--err)" not in disabled_block or "color: #fff" not in disabled_block:
+    problems.append(".pill.disabled 不是红底白字")
+if ".pill.disabled.auto" not in CSS:
+    problems.append("缺少自动停用（auto）的独立配色")
+for needle in ('pill disabled auto', 'pill disabled"', "auto_disabled"):
+    if needle not in JS:
+        problems.append(f"app.js 里缺少状态渲染标记: {needle}")
+
 if problems:
     print(f"前端检查: {len(problems)} 处问题")
     for p in problems:
