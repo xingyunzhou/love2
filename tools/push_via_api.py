@@ -75,14 +75,14 @@ def main() -> int:
     files = [p for p in sh("ls-tree", "-r", "--name-only", head).split("\n") if p]
     print(f"repo={repo} branch={branch} remote={remote_head[:8]} -> local={head[:8]}，全量同步 {len(files)} 个文件")
 
-    tree = json.loads(api_json(f"repos/{repo}/git/trees", "POST", {
+    tree = api_json(f"repos/{repo}/git/trees", "POST", {
         "base_tree": remote_tree,
         "tree": [
             {"path": rel, "mode": "100644", "type": "blob",
              "content": (ROOT / rel).read_text(encoding="utf-8").replace("\r\n", "\n")}
             for rel in files
         ],
-    }))["sha"]
+    })["sha"]
 
     local_tree = sh("log", "-1", "--format=%T", head)
     print("tree", tree, "本地 tree", local_tree, "一致" if tree == local_tree else "不一致（有非文本改动？）")
