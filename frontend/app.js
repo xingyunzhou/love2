@@ -91,7 +91,12 @@ function fmtAgo(ts) {
 }
 
 function statusPill(ep) {
-  if (!ep.enabled) return `<span class="pill disabled"><i></i>已停用</span>`;
+  if (!ep.enabled) {
+    // 自动停用（402 欠费）标深红，人工停用标红底白字
+    return ep.auto_disabled
+      ? `<span class="pill disabled auto"><i></i>欠费停用</span>`
+      : `<span class="pill disabled"><i></i>已停用</span>`;
+  }
   if (ep.status === "cooling") {
     const s = ep.cooldown_left;
     const left = s > 3600 ? `${Math.ceil(s / 3600)}h` : s > 60 ? `${Math.ceil(s / 60)}m` : `${s}s`;
@@ -343,7 +348,9 @@ async function loadSettings() {
   for (const key of Object.keys(s)) {
     if (skip.has(key)) continue;
     const el = form.elements[key];
-    if (el) el.value = s[key];
+    if (!el) continue;
+    if (el.type === "checkbox") el.checked = !!s[key];
+    else el.value = s[key];
   }
   form.default_api_key.value = "";
   form.default_api_key.placeholder = s.has_default_api_key
@@ -367,6 +374,8 @@ $("#settingsForm").addEventListener("submit", async (e) => {
     default_auth_header: form.default_auth_header.value.trim() || "Authorization",
     default_auth_prefix: form.default_auth_prefix.value,
     sticky_spread: form.sticky_spread ? form.sticky_spread.value : undefined,
+    disable_on_quota: form.disable_on_quota.checked,
+    auto_revive: form.auto_revive.checked,
   };
   for (const key of numeric) patch[key] = Number(form.elements[key].value) || 0;
   const newDefaultKey = form.default_api_key.value.trim();

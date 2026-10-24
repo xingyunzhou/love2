@@ -109,6 +109,10 @@
         </select>
       </label>
 
+      <h2>失败处理</h2>
+      <label class="check"><input name="disable_on_quota" type="checkbox" /> 402 / 余额不足时直接停用该接口（不只是冷却）</label>
+      <label class="check"><input name="auto_revive" type="checkbox" /> 自动探活确认恢复后，重新启用被自动停用的接口</label>
+
       <h2>冷却时间（秒）</h2>
       <label>余额/额度不足<input name="cooldown_quota" type="number" min="0" /></label>
       <label>鉴权失败 401/403<input name="cooldown_auth" type="number" min="0" /></label>

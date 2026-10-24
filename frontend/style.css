@@ -228,7 +228,14 @@ td .sub { color: var(--muted); font-size: 11.5px; }
 .pill.ok i { background: var(--ok); }
 .pill.cooling { color: var(--warn); border-color: rgba(240, 180, 41, .35); }
 .pill.cooling i { background: var(--warn); }
-.pill.disabled { color: var(--muted); }
+.pill.disabled {
+  background: var(--err);
+  border-color: var(--err);
+  color: #fff;
+  font-weight: 600;
+}
+.pill.disabled i { background: #fff; }
+.pill.disabled.auto { background: #8f1a23; border-color: #8f1a23; }
 .bar { height: 4px; border-radius: 4px; background: var(--track); overflow: hidden; width: 70px; margin-top: 5px; }
 .bar > div { height: 100%; background: linear-gradient(90deg, #3f7cf0, var(--ok)); }
 

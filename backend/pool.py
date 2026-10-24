@@ -107,8 +107,10 @@ def report_success(ep: dict[str, Any], latency_ms: float) -> None:
 
 def report_failure(ep: dict[str, Any], kind: str, message: str, retryable: bool = True) -> None:
     settings = db.get_settings()
-    cooldown = _cooldown_for(kind, settings) if retryable else 0
-    status = "cooling" if cooldown > 0 else "ok"
+    # 余额不足（402 / 命中欠费关键词）不是"冷一会儿"，是这个号真没钱了 → 直接停用
+    kill = retryable and kind == "quota" and bool(settings.get("disable_on_quota", True))
+    cooldown = _cooldown_for(kind, settings) if (retryable and not kill) else 0
+    status = "cooling" if cooldown > 0 else ("disabled" if kill else "ok")
     db.run(
         "UPDATE endpoint_state SET status=?, cooldown_until=?, "
         "consecutive_failures=consecutive_failures+1, total_requests=total_requests+1, "
@@ -116,6 +118,10 @@ def report_failure(ep: dict[str, Any], kind: str, message: str, retryable: bool 
         "WHERE endpoint_id=?",
         (status, time.time() + cooldown, f"[{kind}] {message}"[:500], time.time(), time.time(), ep["id"]),
     )
+    if kill:
+        db.set_enabled(ep["id"], False, 1)
+        log("error", "quota", f"余额不足（402），已自动停用该接口 ·  {message[:200]}", ep)
+        return
     label = {
         "quota": "余额/额度不足，已冷却",
         "auth": "鉴权失败，已冷却",
@@ -261,6 +267,9 @@ async def probe(ep: dict[str, Any]) -> dict[str, Any]:
 
     if resp.status_code < 400:
         report_success(ep, latency)
+        if not ep.get("enabled") and ep.get("auto_disabled") and settings.get("auto_revive", True):
+            db.set_enabled(ep["id"], True, 0)
+            log("info", "probe", f"探活通过，自动重新启用 {ep['name']}", ep, latency)
         log("info", "probe", f"探活成功 {resp.status_code} · {latency:.0f}ms", ep, latency)
         return {"ok": True, "status": resp.status_code, "latency_ms": round(latency, 1), "error": ""}
 
@@ -280,15 +289,15 @@ async def probe(ep: dict[str, Any]) -> dict[str, Any]:
 async def probe_all() -> list[dict[str, Any]]:
     out = []
     for ep in db.list_endpoints():
-        if not ep["enabled"]:
-            continue
+        if not ep["enabled"] and not ep.get("auto_disabled"):
+            continue  # 手动停用的不探；系统因欠费停用的要探，通了才能自己活过来
         result = await probe(ep)
         out.append({"id": ep["id"], "name": ep["name"], **result})
     return out
 
 
 async def auto_probe_loop(stop: asyncio.Event) -> None:
-    """周期性探活处于冷却状态的接口，余额恢复了就自动放回池子。"""
+    """周期性探活：冷却中的号等恢复，因欠费被自动停用的号也探（通了自动启用）。"""
     while not stop.is_set():
         settings = db.get_settings()
         interval = int(settings.get("probe_interval") or 0)
@@ -299,10 +308,12 @@ async def auto_probe_loop(stop: asyncio.Event) -> None:
             sleep_for = 30
         else:
             now = time.time()
+            revive = bool(settings.get("auto_revive", True))
             for ep in db.list_endpoints():
-                if not ep["enabled"] or effective_status(ep, now) != "cooling":
-                    continue
-                await probe(ep)
+                cooling = ep["enabled"] and effective_status(ep, now) == "cooling"
+                killed = (not ep["enabled"]) and bool(ep.get("auto_disabled")) and revive
+                if cooling or killed:
+                    await probe(ep)
             sleep_for = max(interval, 15)
         try:
             await asyncio.wait_for(stop.wait(), timeout=sleep_for)

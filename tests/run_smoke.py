@@ -84,13 +84,31 @@ def main() -> int:
 
             ov = client.get("/api/overview", headers=H).json()
             by_name = {e["name"]: e for e in ov["endpoints"]}
-            assert by_name["dead-quota"]["status"] == "cooling", by_name["dead-quota"]
+            # 402 不是冷却，是直接停用
+            assert by_name["dead-quota"]["status"] == "disabled", by_name["dead-quota"]
+            assert by_name["dead-quota"]["enabled"] is False, by_name["dead-quota"]
+            assert by_name["dead-quota"]["auto_disabled"] is True, by_name["dead-quota"]
             assert by_name["dead-auth"]["status"] == "cooling", by_name["dead-auth"]
+            assert by_name["dead-auth"]["enabled"] is True, by_name["dead-auth"]
             assert by_name["alive"]["status"] == "ok", by_name["alive"]
-            print(f"  冷却: dead-quota {by_name['dead-quota']['cooldown_left']}s ← "
-                  f"{by_name['dead-quota']['last_error'][:60]}")
-            print(f"  冷却: dead-auth  {by_name['dead-auth']['cooldown_left']}s ← "
-                  f"{by_name['dead-auth']['last_error'][:60]}")
+            print(f"  402 → 自动停用: dead-quota enabled={by_name['dead-quota']['enabled']} "
+                  f"auto={by_name['dead-quota']['auto_disabled']} ← "
+                  f"{by_name['dead-quota']['last_error'][:50]}")
+            print(f"  401 → 冷却: dead-auth {by_name['dead-auth']['cooldown_left']}s")
+
+            # 3.5) 停用的号不参与路由；换 key + 探活通过后自动复活
+            r = client.put(f"/api/endpoints/{ids[0]}", headers=H, json={"api_key": "sk-recovered"})
+            assert r.json()["enabled"] is False, "改 key 不该顺手启用"
+            r = client.post(f"/api/endpoints/{ids[0]}/probe", headers=H)
+            assert r.json()["ok"] is True, r.text
+            revived = next(e for e in client.get("/api/overview", headers=H).json()["endpoints"]
+                           if e["id"] == ids[0])
+            assert revived["enabled"] is True and revived["auto_disabled"] is False, revived
+            print("  探活通过 → 自动重新启用: ok")
+
+            # 还原成坏 key 并人工停用，让后面的轮询断言保持确定
+            client.put(f"/api/endpoints/{ids[0]}", headers=H,
+                       json={"api_key": "sk-quota", "enabled": False})
 
             # 4) 后续请求不再碰冷却中的接口
             for _ in range(3):
@@ -130,6 +148,7 @@ def main() -> int:
             assert r.status_code == 200 and r.json()["ok"] is True, r.text
             r = client.post(f"/api/endpoints/{ids[0]}/reset?counters=true", headers=H)
             assert r.json()["status"] == "ok" and r.json()["total_requests"] == 0, r.text
+            assert r.json()["enabled"] is True and r.json()["auto_disabled"] is False, r.json()
             r = client.post(f"/api/endpoints/{ids[1]}/toggle", headers=H)
             assert r.json()["enabled"] is False
             r = client.post(f"/api/endpoints/{ids[1]}/toggle", headers=H)
@@ -186,7 +205,7 @@ def main() -> int:
             print("  静态前端: ok")
 
             # 9.5) 粘性路由：同一会话固定命中同一接口（上游 prompt 缓存才可能命中）
-            client.post(f"/api/endpoints/{ids[0]}/toggle", headers=H)  # 停掉 dead-quota，池里只留两个活号
+            client.put(f"/api/endpoints/{ids[0]}", headers=H, json={"enabled": False})  # 幂等停用，池里只留活号
             r = client.post("/api/endpoints", headers=H,
                             json={"name": "sticky-b", "base_url": f"http://127.0.0.1:{PORTS[1]}",
                                   "api_key": "sk-sticky-b"})
