@@ -10,6 +10,13 @@ const state = {
   es: null,
   timer: null,
   probing: new Set(),
+  // 号池视图：可用 / 停用 两个 tab + 搜索 + 分页
+  poolView: localStorage.getItem("pool_view") === "inactive" ? "inactive" : "active",
+  search: "",
+  page: 1,
+  pageSize: Number(localStorage.getItem("pool_page_size")) || 10,
+  cntActive: 0,
+  cntInactive: 0,
 };
 
 const esc = (s) =>
@@ -151,7 +158,7 @@ function endpointRow(ep) {
           ${ep.auto_disabled ? `<div class="sub">停用于 ${fmtDate(ep.disabled_at)} · 自动启用 ${fmtDate(ep.auto_enable_at)}</div>` : ""}
         </td>
         <td class="url" title="${esc(ep.base_url)}">${esc(ep.base_url)}</td>
-        <td class="mono sub">${
+        <td class="mono sub key">${
           ep.has_key
             ? esc(ep.api_key_masked || "未设置")
             : ep.uses_default_key
@@ -172,12 +179,6 @@ function endpointRow(ep) {
       </tr>`;
 }
 
-function groupRow(title, count, cls) {
-  return `<tr class="group-row ${cls}"><td colspan="9">
-    <span class="group-title">${title}</span><span class="group-count">${count}</span>
-  </td></tr>`;
-}
-
 function renderTable(endpoints) {
   const body = $("#poolBody");
   $("#emptyHint").classList.toggle("hidden", endpoints.length > 0);
@@ -186,11 +187,57 @@ function renderTable(endpoints) {
   const inactive = endpoints
     .filter((ep) => !ep.enabled)
     .sort((a, b) => (a.auto_disabled ? a.revive_left || 1 : 1e12) - (b.auto_disabled ? b.revive_left || 1 : 1e12));
-  const chunk = (list) =>
-    list.length ? list.map(endpointRow).join("") : `<tr><td colspan="9" class="group-empty">（无）</td></tr>`;
-  body.innerHTML =
-    groupRow("可用账号", active.length, "ok") + chunk(active) +
-    groupRow("停用账号", inactive.length, "off") + chunk(inactive);
+
+  state.cntActive = active.length;
+  state.cntInactive = inactive.length;
+  $("#cntActive").textContent = active.length;
+  $("#cntInactive").textContent = inactive.length;
+
+  const source = state.poolView === "inactive" ? inactive : active;
+  const keyword = state.search.trim().toLowerCase();
+  const filtered = keyword
+    ? source.filter((ep) =>
+        `${ep.name} ${ep.base_url} ${ep.notes}`.toLowerCase().includes(keyword))
+    : source;
+
+  const pageSize = state.pageSize || 10;
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  if (state.page > pages) state.page = pages;
+  const start = (state.page - 1) * pageSize;
+  const slice = filtered.slice(start, start + pageSize);
+
+  body.innerHTML = slice.length
+    ? slice.map(endpointRow).join("")
+    : `<tr><td colspan="9" class="group-empty">${
+        keyword ? "没有匹配的账号" : state.poolView === "inactive" ? "没有停用的账号" : "没有可用账号"
+      }</td></tr>`;
+
+  renderPager(pages, filtered.length, start, slice.length);
+}
+
+function renderPager(pages, total, start, shown) {
+  const el = $("#pager");
+  if (!total) {
+    el.innerHTML = "";
+    return;
+  }
+  const page = state.page;
+  const btn = (label, target, disabled, active) =>
+    `<button class="tiny ghost${active ? " on" : ""}" data-page="${target}" ${disabled ? "disabled" : ""}>${label}</button>`;
+
+  // 页码条：首尾 + 当前附近，中间用省略号
+  const nums = [];
+  for (let i = 1; i <= pages; i++) {
+    if (i === 1 || i === pages || Math.abs(i - page) <= 2) nums.push(i);
+    else if (nums[nums.length - 1] !== "…") nums.push("…");
+  }
+
+  el.innerHTML = `
+    <span class="muted">共 ${total} 个 · 第 ${page}/${pages} 页 · 显示 ${start + 1}-${start + shown}</span>
+    <span class="spacer"></span>
+    ${btn("上一页", page - 1, page <= 1, false)}
+    ${nums.map((n) => (n === "…" ? `<span class="muted">…</span>` : btn(String(n), n, false, n === page))).join("")}
+    ${btn("下一页", page + 1, page >= pages, false)}`;
 }
 
 async function refresh() {
@@ -244,6 +291,42 @@ $("#poolBody").addEventListener("click", async (e) => {
     toast(String(err.message || err), true);
     refresh();
   }
+});
+
+/* 号池视图：可用/停用 tab、搜索、分页 */
+$("#poolTabs").addEventListener("click", (e) => {
+  const tab = e.target.closest("button[data-view]");
+  if (!tab) return;
+  state.poolView = tab.dataset.view;
+  state.page = 1;
+  localStorage.setItem("pool_view", state.poolView);
+  $$(".ptab").forEach((t) => t.classList.toggle("active", t === tab));
+  if (state.overview) renderTable(state.overview.endpoints);
+});
+
+let searchTimer = null;
+$("#poolSearch").addEventListener("input", (e) => {
+  state.search = e.target.value;
+  state.page = 1;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    if (state.overview) renderTable(state.overview.endpoints);
+  }, 150);
+});
+
+$("#pageSize").addEventListener("change", (e) => {
+  state.pageSize = Number(e.target.value) || 10;
+  state.page = 1;
+  localStorage.setItem("pool_page_size", String(state.pageSize));
+  if (state.overview) renderTable(state.overview.endpoints);
+});
+
+$("#pager").addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-page]");
+  if (!btn || btn.disabled) return;
+  state.page = Number(btn.dataset.page) || 1;
+  if (state.overview) renderTable(state.overview.endpoints);
+  $(".table-wrap")?.scrollIntoView({ block: "start", behavior: "smooth" });
 });
 
 $("#addBtn").addEventListener("click", () => openEditDialog(null));
@@ -486,6 +569,11 @@ setInterval(() => {
 }, 1000);
 
 async function boot() {
+  // 恢复上次的视图状态
+  $$(".ptab").forEach((t) => t.classList.toggle("active", t.dataset.view === state.poolView));
+  $("#pageSize").value = String(state.pageSize);
+  $("#poolSearch").value = state.search;
+
   await refresh();
   if (!state.overview?.admin_token_required) {
     const banner = document.createElement("div");

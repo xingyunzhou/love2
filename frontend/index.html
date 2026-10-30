@@ -54,6 +54,21 @@
 <main>
   <section id="tab-pool">
     <div id="stats" class="stats"></div>
+
+    <div class="pool-toolbar">
+      <div class="pool-tabs" id="poolTabs">
+        <button type="button" class="ptab active" data-view="active">可用账号 <b id="cntActive">0</b></button>
+        <button type="button" class="ptab" data-view="inactive">停用账号 <b id="cntInactive">0</b></button>
+      </div>
+      <input id="poolSearch" class="search" type="search" placeholder="搜索 名称 / 地址 / 备注" autocomplete="off" />
+      <select id="pageSize" class="page-size" title="每页条数">
+        <option value="10">10 条/页</option>
+        <option value="20">20 条/页</option>
+        <option value="50">50 条/页</option>
+        <option value="100">100 条/页</option>
+      </select>
+    </div>
+
     <div class="table-wrap">
       <table class="pool">
         <thead>
@@ -66,6 +81,7 @@
       </table>
       <p id="emptyHint" class="empty hidden">号池里还没有接口，点右上角「+ 添加接口」开始。</p>
     </div>
+    <div class="pager" id="pager"></div>
   </section>
 
   <section id="tab-logs" class="hidden">
