@@ -17,6 +17,8 @@ const state = {
   pageSize: Number(localStorage.getItem("pool_page_size")) || 10,
   cntActive: 0,
   cntInactive: 0,
+  selected: new Set(),   // 批量编辑选中的账号 id
+  filteredIds: [],       // 当前筛选结果（全选时用）
 };
 
 const esc = (s) =>
@@ -149,7 +151,9 @@ function renderStats(stats) {
 function endpointRow(ep) {
   const rate = ep.total_requests ? `${ep.success_rate}%` : "—";
   const barW = ep.total_requests ? Math.max(2, ep.success_rate) : 0;
-  return `<tr data-id="${ep.id}">
+  const picked = state.selected.has(ep.id);
+  return `<tr data-id="${ep.id}" class="${picked ? "selected" : ""}">
+        <td class="col-check"><input type="checkbox" class="row-check" data-id="${ep.id}" ${picked ? "checked" : ""} /></td>
         <td>${statusPill(ep)}</td>
         <td>
           <div class="name">${esc(ep.name)}</div>
@@ -200,6 +204,11 @@ function renderTable(endpoints) {
         `${ep.name} ${ep.base_url} ${ep.notes}`.toLowerCase().includes(keyword))
     : source;
 
+  // 选择集合只保留还存在的账号
+  const alive = new Set(endpoints.map((ep) => ep.id));
+  state.selected = new Set([...state.selected].filter((id) => alive.has(id)));
+  state.filteredIds = filtered.map((ep) => ep.id);
+
   const pageSize = state.pageSize || 10;
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   if (state.page > pages) state.page = pages;
@@ -208,11 +217,30 @@ function renderTable(endpoints) {
 
   body.innerHTML = slice.length
     ? slice.map(endpointRow).join("")
-    : `<tr><td colspan="9" class="group-empty">${
+    : `<tr><td colspan="10" class="group-empty">${
         keyword ? "没有匹配的账号" : state.poolView === "inactive" ? "没有停用的账号" : "没有可用账号"
       }</td></tr>`;
 
   renderPager(pages, filtered.length, start, slice.length);
+  syncCheckAll(slice.map((ep) => ep.id));
+  updateBulkBar();
+}
+
+/* 表头全选：只作用于当前页 */
+function syncCheckAll(pageIds) {
+  const box = $("#checkAll");
+  if (!box) return;
+  const picked = pageIds.filter((id) => state.selected.has(id)).length;
+  box.checked = pageIds.length > 0 && picked === pageIds.length;
+  box.indeterminate = picked > 0 && picked < pageIds.length;
+}
+
+function updateBulkBar() {
+  const n = state.selected.size;
+  const btn = $("#bulkBtn");
+  if (!btn) return;
+  btn.disabled = n === 0;
+  $("#bulkCount").textContent = n;
 }
 
 function renderPager(pages, total, start, shown) {
@@ -290,6 +318,83 @@ $("#poolBody").addEventListener("click", async (e) => {
   } catch (err) {
     toast(String(err.message || err), true);
     refresh();
+  }
+});
+
+/* 批量编辑：勾选、全选、弹窗提交 */
+$("#poolBody").addEventListener("change", (e) => {
+  const box = e.target.closest("input.row-check");
+  if (!box) return;
+  const id = Number(box.dataset.id);
+  if (box.checked) state.selected.add(id);
+  else state.selected.delete(id);
+  box.closest("tr")?.classList.toggle("selected", box.checked);
+  syncCheckAll([...document.querySelectorAll(".row-check")].map((el) => Number(el.dataset.id)));
+  updateBulkBar();
+});
+
+$("#checkAll").addEventListener("change", (e) => {
+  const ids = [...document.querySelectorAll(".row-check")].map((el) => Number(el.dataset.id));
+  for (const id of ids) {
+    if (e.target.checked) state.selected.add(id);
+    else state.selected.delete(id);
+  }
+  if (state.overview) renderTable(state.overview.endpoints);
+});
+
+$("#bulkBtn").addEventListener("click", () => {
+  const n = state.selected.size;
+  $("#bulkSummary").textContent =
+    `已选 ${n} 个账号；当前筛选结果共 ${state.filteredIds.length} 个。`;
+  const form = $("#bulkForm");
+  form.reset();
+  $("#bulkDialog").showModal();
+});
+
+$("#bulkForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const action = form.action.value;
+  const all = form.overwrite_all.checked;
+  const count = all ? state.filteredIds.length : state.selected.size;
+  if (!count) {
+    toast("没有选中任何账号", true);
+    return;
+  }
+  if (action === "delete" && !confirm(`确认删除 ${count} 个账号？不可恢复。`)) return;
+
+  const trimmed = (v) => {
+    const t = (v || "").trim();
+    if (!t) return undefined;
+    return t === "-" ? "" : t;
+  };
+  const payload = {
+    ids: [...state.selected],
+    select_all: all,
+    view: state.poolView,
+    keyword: state.search.trim(),
+    action,
+  };
+  const weight = form.weight.value.trim();
+  const priority = form.priority.value.trim();
+  if (weight) payload.weight = Number(weight);
+  if (priority) payload.priority = Number(priority);
+  for (const key of ["model", "notes", "auth_header", "auth_prefix"]) {
+    const v = trimmed(form[key].value);
+    if (v !== undefined) payload[key] = v;
+  }
+  if (form.api_key.value.trim()) payload.api_key = form.api_key.value.trim();
+  if (form.rename_prefix.value.trim()) payload.rename_prefix = form.rename_prefix.value.trim();
+
+  try {
+    const res = await api("/api/endpoints/bulk", { method: "POST", body: payload });
+    toast(`已执行 ${action}：${res.affected} 个账号` +
+          (res.patched?.length ? `，改动字段 ${res.patched.join("/")}` : ""));
+    $("#bulkDialog").close();
+    state.selected.clear();
+    refresh();
+  } catch (err) {
+    toast(String(err.message || err), true);
   }
 });
 

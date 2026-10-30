@@ -67,6 +67,23 @@ class EndpointPatch(BaseModel):
     notes: Optional[str] = None
 
 
+class BulkEdit(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+    select_all: bool = False          # 选中当前筛选结果的全部（配合 view/keyword）
+    view: str = "all"                 # all | active | inactive
+    keyword: str = ""
+    action: Optional[str] = None      # enable | disable | reset | delete | probe
+    enabled: Optional[bool] = None
+    weight: Optional[int] = None
+    priority: Optional[int] = None
+    model: Optional[str] = None
+    notes: Optional[str] = None
+    auth_header: Optional[str] = None
+    auth_prefix: Optional[str] = None
+    api_key: Optional[str] = None
+    rename_prefix: Optional[str] = None
+
+
 class SettingsPatch(BaseModel):
     strategy: Optional[str] = None
     max_attempts: Optional[int] = None
@@ -321,6 +338,86 @@ async def update_endpoint(endpoint_id: int, body: EndpointPatch) -> dict[str, An
     db.update_endpoint(endpoint_id, patch)
     pool.log("info", "admin", f"更新接口: {ep['name']}")
     return serialize(endpoint_or_404(endpoint_id))
+
+
+@app.post("/api/endpoints/bulk", dependencies=[Depends(admin)])
+async def bulk_edit(body: BulkEdit) -> dict[str, Any]:
+    """批量编辑：先解析目标集合，再按 action 或字段补丁统一处理。"""
+    # 1) 解析目标
+    if body.select_all:
+        keyword = body.keyword.strip().lower()
+        targets = [
+            ep for ep in db.list_endpoints()
+            if (body.view == "all"
+                or (body.view == "active" and ep["enabled"])
+                or (body.view == "inactive" and not ep["enabled"]))
+            and (not keyword or keyword in f"{ep['name']} {ep['base_url']} {ep['notes']}".lower())
+        ]
+        ids = [ep["id"] for ep in targets]
+    else:
+        ids = [i for i in dict.fromkeys(body.ids) if i > 0]
+    if not ids:
+        raise HTTPException(status_code=400, detail="没有选中任何账号")
+
+    # 2) 字段补丁
+    patch: dict[str, Any] = {}
+    if body.weight is not None:
+        patch["weight"] = max(1, body.weight)
+    if body.priority is not None:
+        patch["priority"] = body.priority
+    if body.model is not None:
+        patch["model"] = body.model.strip()
+    if body.notes is not None:
+        patch["notes"] = body.notes.strip()
+    if body.auth_header is not None and body.auth_header.strip():
+        patch["auth_header"] = body.auth_header.strip()
+    if body.auth_prefix is not None:
+        patch["auth_prefix"] = body.auth_prefix
+    if body.api_key is not None and body.api_key.strip():
+        patch["api_key_enc"] = encrypt(body.api_key.strip())
+
+    touched = 0
+    for index, endpoint_id in enumerate(ids, start=1):
+        ep = db.get_endpoint(endpoint_id)
+        if not ep:
+            continue
+        if body.rename_prefix is not None and body.rename_prefix.strip():
+            patch["name"] = f"{body.rename_prefix.strip()}-{index:02d}"
+        if patch:
+            db.update_endpoint(endpoint_id, patch)
+        touched += 1
+
+    # 3) 动作
+    action = (body.action or "").strip()
+    if action in ("enable", "disable"):
+        enable = action == "enable"
+        for endpoint_id in ids:
+            db.set_enabled(endpoint_id, enable, 0)
+            if enable:
+                db.reset_state(endpoint_id)
+    elif action == "reset":
+        for endpoint_id in ids:
+            db.reset_state(endpoint_id)
+            db.set_enabled(endpoint_id, True, 0)
+            db.reset_counters(endpoint_id)
+    elif action == "delete":
+        for endpoint_id in ids:
+            db.delete_endpoint(endpoint_id)
+            db.drop_affinity_for_endpoint(endpoint_id)
+    elif action == "probe":
+        for endpoint_id in ids:
+            ep = db.get_endpoint(endpoint_id)
+            if ep and ep["enabled"]:
+                await pool.probe(ep)
+
+    pool.log("info", "admin",
+             f"批量操作 {action or '编辑'}：{len(ids)} 个账号，字段改动 {len(patch)} 项")
+    return {
+        "affected": len(ids),
+        "patched": sorted(patch),
+        "action": action or "edit",
+        "deleted": len(ids) if action == "delete" else 0,
+    }
 
 
 @app.delete("/api/endpoints/{endpoint_id}", dependencies=[Depends(admin)])
