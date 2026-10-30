@@ -8,11 +8,18 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# 本机可能配了 HTTP(S)_PROXY / 畸形的 NO_PROXY（比如 [::1]），httpx 解析会炸，
+# 冒烟只打 127.0.0.1，直接把这些环境变量摘掉。
+for _var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    os.environ.pop(_var, None)
+os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 
 DATA_DIR = ROOT / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -111,9 +118,31 @@ def main() -> int:
             assert ids[0] not in probed, "全部探活不该碰停用的号"
             print("  停用号不路由 / 不批量探活 / 探活不自动启用: ok")
 
-            # 还原成坏 key 并保持停用，让后面的轮询断言保持确定
+            # 3.6) 欠费停用满 31 天后自动回池
+            assert after_probe["disabled_at"] > 0 and after_probe["auto_enable_at"] > 0, after_probe
+            span_days = (after_probe["auto_enable_at"] - after_probe["disabled_at"]) / 86400
+            assert 30.9 <= span_days <= 31.1, f"默认应是 31 天，实际 {span_days}"
+            assert after_probe["revive_left"] > 30 * 86400, after_probe
+
+            from backend import db as _db  # 同进程，直接把到期时间拨到过去
+            _db.run("UPDATE endpoint_state SET auto_enable_at=? WHERE endpoint_id=?",
+                    (time.time() - 10, ids[0]))
+            r = client.post("/api/maintenance", headers=H).json()
+            assert any(x["id"] == ids[0] for x in r["revived"]), r
+            revived = next(e for e in client.get("/api/overview", headers=H).json()["endpoints"]
+                           if e["id"] == ids[0])
+            assert revived["enabled"] is True and revived["auto_disabled"] is False, revived
+            print(f"  欠费停用 {span_days:.0f} 天到期自动启用: ok")
+
+            # 人工停用的号不参与自动启用
             client.put(f"/api/endpoints/{ids[0]}", headers=H,
                        json={"api_key": "sk-quota", "enabled": False})
+            r = client.post("/api/maintenance", headers=H).json()
+            assert all(x["id"] != ids[0] for x in r["revived"]), r
+            manual = next(e for e in client.get("/api/overview", headers=H).json()["endpoints"]
+                          if e["id"] == ids[0])
+            assert manual["enabled"] is False and manual["auto_disabled"] is False, manual
+            print("  人工停用不参与自动启用: ok")
 
             # 4) 后续请求不再碰冷却中的接口
             for _ in range(3):

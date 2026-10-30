@@ -146,7 +146,7 @@ async def handle(request: Request, path: str) -> Response:
 
     tried: set[int] = set()
     trace: list[dict[str, Any]] = []
-    client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=30.0), follow_redirects=True)
+    client = pool.make_client(httpx.Timeout(timeout, connect=30.0))
     streaming = False
 
     try:

@@ -119,8 +119,11 @@ def report_failure(ep: dict[str, Any], kind: str, message: str, retryable: bool 
         (status, time.time() + cooldown, f"[{kind}] {message}"[:500], time.time(), time.time(), ep["id"]),
     )
     if kill:
-        db.set_enabled(ep["id"], False, 1)
-        log("error", "quota", f"余额不足（402），已自动停用该接口 ·  {message[:200]}", ep)
+        days = int(settings.get("quota_revive_days") or 0)
+        auto_enable_at = time.time() + days * 86400 if days > 0 else 0.0
+        db.set_enabled(ep["id"], False, 1, auto_enable_at)
+        until = f"，{days} 天后自动重新启用" if days > 0 else "，需手动启用"
+        log("error", "quota", f"余额不足（402），已自动停用该接口{until} · {message[:200]}", ep)
         return
     label = {
         "quota": "余额/额度不足，已冷却",
@@ -133,6 +136,39 @@ def report_failure(ep: dict[str, Any], kind: str, message: str, retryable: bool 
     level = "warn" if kind in ("quota", "auth", "rate_limit") else "error"
     cooldown_note = f"，冷却 {int(cooldown)}s" if cooldown > 0 else ""
     log(level, kind, f"{label}{cooldown_note} · {message[:200]}", ep)
+
+
+# ------------------------------------------------------------------ 到期复活
+def revive_expired() -> list[dict[str, Any]]:
+    """欠费停用满期（默认 31 天）的号自动放回池子；人工停用的不在此列。"""
+    revived: list[dict[str, Any]] = []
+    for row in db.due_revivals():
+        db.set_enabled(row["id"], True, 0)
+        db.reset_state(row["id"])
+        days = max(1, round((row["auto_enable_at"] - row["disabled_at"]) / 86400))
+        log("info", "revive", f"欠费停用满 {days} 天，自动重新启用 {row['name']}")
+        revived.append(row)
+    return revived
+
+
+# ------------------------------------------------------------------ HTTP
+_env_proxy_broken = False
+
+
+def make_client(timeout: Any, follow_redirects: bool = True) -> httpx.AsyncClient:
+    """建 httpx 客户端：优先信任环境变量里的代理；代理配置畸形时退化为直连。
+
+    有些环境把 NO_PROXY 写成 `[::1]`，httpx 解析这条会抛 InvalidURL，整个进程连不上任何
+    上游。宁可直连也不能让一个环境变量把号池打死。
+    """
+    global _env_proxy_broken
+    if not _env_proxy_broken:
+        try:
+            return httpx.AsyncClient(timeout=timeout, follow_redirects=follow_redirects)
+        except Exception as exc:  # noqa: BLE001 - httpx.InvalidURL 等
+            _env_proxy_broken = True
+            log("warn", "system", f"环境代理配置无法解析（{type(exc).__name__}: {exc}），改为直连上游")
+    return httpx.AsyncClient(timeout=timeout, follow_redirects=follow_redirects, trust_env=False)
 
 
 # ------------------------------------------------------------------ 选号
@@ -253,7 +289,7 @@ async def probe(ep: dict[str, Any]) -> dict[str, Any]:
     headers = {"accept": "application/json", **auth_headers(ep)}
     started = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with make_client(timeout) as client:
             resp = await client.get(url, headers=headers)
         latency = (time.perf_counter() - started) * 1000
     except httpx.HTTPError as exc:

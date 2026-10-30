@@ -70,6 +70,18 @@ for needle in ('pill disabled auto', 'pill disabled"', "auto_disabled"):
     if needle not in JS:
         problems.append(f"app.js 里缺少状态渲染标记: {needle}")
 
+# 分区表头与欠费倒计时
+for needle, where, text in (
+    ("group-row", CSS, "style.css 缺少分区表头样式"),
+    ("group-row", JS, "app.js 没有渲染分区表头"),
+    ("可用账号", JS, "缺少「可用账号」分区"),
+    ("停用账号", JS, "缺少「停用账号」分区"),
+    ("revive_left", JS, "停用分区没有倒计时"),
+    ("quota_revive_days", HTML, "设置里没有欠费自动启用天数"),
+):
+    if needle not in where:
+        problems.append(text)
+
 if problems:
     print(f"前端检查: {len(problems)} 处问题")
     for p in problems:
