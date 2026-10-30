@@ -111,8 +111,9 @@
 
       <h2>失败处理</h2>
       <label class="check"><input name="disable_on_quota" type="checkbox" /> 402 / 余额不足时直接停用该接口（不只是冷却）</label>
+      <label>欠费停用多少天后自动启用（0 = 只认手动）<input name="quota_revive_days" type="number" min="0" max="3650" /></label>
       <p class="muted" style="grid-column:1/-1;margin:0;font-size:12.5px">
-        停用的接口退出路由，也不会再被自动探活；探活只跑「启用中且冷却中」的号。要恢复就点该行的「启用」或「重置」。
+        停用的接口退出路由，也不会再被自动探活。欠费停用的号到点自动回池，列表里显示倒计时；要提前恢复就点该行的「启用」或「重置」。
       </p>
 
       <h2>冷却时间（秒）</h2>

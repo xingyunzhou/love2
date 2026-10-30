@@ -90,12 +90,28 @@ function fmtAgo(ts) {
   return `${Math.floor(diff / 86400)}d 前`;
 }
 
+function fmtCountdown(sec) {
+  if (!sec || sec <= 0) return "即将";
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  if (d >= 1) return `${d}天${h > 0 ? h + "小时" : ""}`;
+  if (h >= 1) return `${h}小时`;
+  return `${Math.max(1, Math.floor(sec / 60))}分钟`;
+}
+
+function fmtDate(ts) {
+  if (!ts) return "—";
+  return new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
 function statusPill(ep) {
   if (!ep.enabled) {
-    // 自动停用（402 欠费）标深红，人工停用标红底白字
-    return ep.auto_disabled
-      ? `<span class="pill disabled auto"><i></i>欠费停用</span>`
-      : `<span class="pill disabled"><i></i>已停用</span>`;
+    // 自动停用（402 欠费）标深红并带倒计时，人工停用标红底白字
+    if (ep.auto_disabled) {
+      const left = ep.revive_left ? `${fmtCountdown(ep.revive_left)}后自动启用` : "需手动启用";
+      return `<span class="pill disabled auto" title="自动启用时间：${fmtDate(ep.auto_enable_at)}"><i></i>欠费停用 · ${left}</span>`;
+    }
+    return `<span class="pill disabled"><i></i>已停用</span>`;
   }
   if (ep.status === "cooling") {
     const s = ep.cooldown_left;
@@ -123,19 +139,16 @@ function renderStats(stats) {
     .join("");
 }
 
-function renderTable(endpoints) {
-  const body = $("#poolBody");
-  $("#emptyHint").classList.toggle("hidden", endpoints.length > 0);
-  body.innerHTML = endpoints
-    .map((ep) => {
-      const rate = ep.total_requests ? `${ep.success_rate}%` : "—";
-      const barW = ep.total_requests ? Math.max(2, ep.success_rate) : 0;
-      return `<tr data-id="${ep.id}">
+function endpointRow(ep) {
+  const rate = ep.total_requests ? `${ep.success_rate}%` : "—";
+  const barW = ep.total_requests ? Math.max(2, ep.success_rate) : 0;
+  return `<tr data-id="${ep.id}">
         <td>${statusPill(ep)}</td>
         <td>
           <div class="name">${esc(ep.name)}</div>
           ${ep.model ? `<div class="sub">model: ${esc(ep.model)}</div>` : ""}
           ${ep.notes ? `<div class="sub">${esc(ep.notes)}</div>` : ""}
+          ${ep.auto_disabled ? `<div class="sub">停用于 ${fmtDate(ep.disabled_at)} · 自动启用 ${fmtDate(ep.auto_enable_at)}</div>` : ""}
         </td>
         <td class="url" title="${esc(ep.base_url)}">${esc(ep.base_url)}</td>
         <td class="mono sub">${
@@ -157,8 +170,27 @@ function renderTable(endpoints) {
           <button class="tiny ghost danger" data-act="delete">删除</button>
         </td>
       </tr>`;
-    })
-    .join("");
+}
+
+function groupRow(title, count, cls) {
+  return `<tr class="group-row ${cls}"><td colspan="9">
+    <span class="group-title">${title}</span><span class="group-count">${count}</span>
+  </td></tr>`;
+}
+
+function renderTable(endpoints) {
+  const body = $("#poolBody");
+  $("#emptyHint").classList.toggle("hidden", endpoints.length > 0);
+  const active = endpoints.filter((ep) => ep.enabled);
+  // 停用区按「最快自动启用」排前面，人工停用的排最后
+  const inactive = endpoints
+    .filter((ep) => !ep.enabled)
+    .sort((a, b) => (a.auto_disabled ? a.revive_left || 1 : 1e12) - (b.auto_disabled ? b.revive_left || 1 : 1e12));
+  const chunk = (list) =>
+    list.length ? list.map(endpointRow).join("") : `<tr><td colspan="9" class="group-empty">（无）</td></tr>`;
+  body.innerHTML =
+    groupRow("可用账号", active.length, "ok") + chunk(active) +
+    groupRow("停用账号", inactive.length, "off") + chunk(inactive);
 }
 
 async function refresh() {
@@ -365,7 +397,7 @@ $("#settingsForm").addEventListener("submit", async (e) => {
   const numeric = [
     "max_attempts", "request_timeout", "cooldown_quota", "cooldown_auth",
     "cooldown_rate", "cooldown_server", "probe_interval", "probe_timeout",
-    "sticky_ttl", "log_keep", "log_keep_hours", "affinity_max",
+    "sticky_ttl", "log_keep", "log_keep_hours", "affinity_max", "quota_revive_days",
   ];
   const patch = {
     strategy: form.strategy.value,

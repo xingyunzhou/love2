@@ -44,7 +44,9 @@ CREATE TABLE IF NOT EXISTS endpoint_state (
     last_used_at         REAL    NOT NULL DEFAULT 0,
     last_probe_at        REAL    NOT NULL DEFAULT 0,
     last_probe_ms        REAL    NOT NULL DEFAULT 0,
-    auto_disabled        INTEGER NOT NULL DEFAULT 0
+    auto_disabled        INTEGER NOT NULL DEFAULT 0,
+    disabled_at          REAL    NOT NULL DEFAULT 0,
+    auto_enable_at       REAL    NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -106,6 +108,8 @@ SETTINGS_DEFAULTS: dict[str, Any] = {
     "affinity_max": 20000,
     # 402 / 余额不足 → 直接停用该接口（不是冷却）；停用后不再自动探活，启用与否由人决定
     "disable_on_quota": True,
+    # 欠费停用后多少天自动放回池子（0 = 永不自动启用，只认人工）
+    "quota_revive_days": 31,
 }
 
 _ENDPOINT_COLUMNS = (
@@ -128,7 +132,9 @@ SELECT e.id, e.name, e.base_url, e.api_key_enc, e.auth_header, e.auth_prefix, e.
        COALESCE(s.last_used_at, 0)            AS last_used_at,
        COALESCE(s.last_probe_at, 0)           AS last_probe_at,
        COALESCE(s.last_probe_ms, 0)           AS last_probe_ms,
-       COALESCE(s.auto_disabled, 0)           AS auto_disabled
+       COALESCE(s.auto_disabled, 0)           AS auto_disabled,
+       COALESCE(s.disabled_at, 0)             AS disabled_at,
+       COALESCE(s.auto_enable_at, 0)          AS auto_enable_at
 FROM endpoints e LEFT JOIN endpoint_state s ON s.endpoint_id = e.id
 """
 
@@ -149,9 +155,14 @@ def conn() -> sqlite3.Connection:
 def _migrate(c: sqlite3.Connection) -> None:
     """老库补列：SQLite 没有 ADD COLUMN IF NOT EXISTS，只能先查后加。"""
     cols = {row[1] for row in c.execute("PRAGMA table_info(endpoint_state)").fetchall()}
-    if "auto_disabled" not in cols:
-        c.execute("ALTER TABLE endpoint_state ADD COLUMN auto_disabled INTEGER NOT NULL DEFAULT 0")
-        c.commit()
+    for name, decl in (
+        ("auto_disabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("disabled_at", "REAL NOT NULL DEFAULT 0"),
+        ("auto_enable_at", "REAL NOT NULL DEFAULT 0"),
+    ):
+        if name not in cols:
+            c.execute(f"ALTER TABLE endpoint_state ADD COLUMN {name} {decl}")
+    c.commit()
     # 废弃的设置项清掉，免得 get_settings 把它们又带出来
     c.execute("DELETE FROM settings WHERE key IN ('auto_revive')")
     c.commit()
@@ -293,12 +304,34 @@ def delete_endpoint(endpoint_id: int) -> None:
     run("DELETE FROM endpoints WHERE id = ?", (endpoint_id,))
 
 
-def set_enabled(endpoint_id: int, enabled: bool, auto_disabled: int = 0) -> None:
-    """启停开关。auto_disabled 标记这次停用是系统自动判的，不是人手点的。"""
+def set_enabled(endpoint_id: int, enabled: bool, auto_disabled: int = 0,
+                auto_enable_at: float = 0.0) -> None:
+    """启停开关。
+
+    auto_disabled=1 表示这次停用是系统判的（欠费），同时记下 disabled_at 和到期自动启用时间；
+    人工启用/停用一律传 auto_disabled=0，顺带把这两个时间戳清掉，人工意图优先。
+    """
+    now = time.time()
+    marked = bool(auto_disabled) and not enabled
     run("UPDATE endpoints SET enabled = ?, updated_at = ? WHERE id = ?",
-        (1 if enabled else 0, time.time(), endpoint_id))
-    run("UPDATE endpoint_state SET auto_disabled = ? WHERE endpoint_id = ?",
-        (1 if auto_disabled else 0, endpoint_id))
+        (1 if enabled else 0, now, endpoint_id))
+    run("UPDATE endpoint_state SET auto_disabled = ?, disabled_at = ?, auto_enable_at = ? "
+        "WHERE endpoint_id = ?",
+        (1 if marked else 0,
+         now if marked else 0.0,
+         float(auto_enable_at) if marked else 0.0,
+         endpoint_id))
+
+
+def due_revivals(now: Optional[float] = None) -> list[dict[str, Any]]:
+    """到点该自动启用的欠费停用账号。"""
+    now = now if now is not None else time.time()
+    return rows(
+        "SELECT e.id, e.name, s.disabled_at, s.auto_enable_at FROM endpoints e "
+        "JOIN endpoint_state s ON s.endpoint_id = e.id "
+        "WHERE e.enabled = 0 AND s.auto_disabled = 1 AND s.auto_enable_at > 0 AND s.auto_enable_at <= ?",
+        (now,),
+    )
 
 
 def reset_state(endpoint_id: int) -> None:

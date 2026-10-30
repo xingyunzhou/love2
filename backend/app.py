@@ -90,6 +90,7 @@ class SettingsPatch(BaseModel):
     log_keep_hours: Optional[int] = None
     affinity_max: Optional[int] = None
     disable_on_quota: Optional[bool] = None
+    quota_revive_days: Optional[int] = None
 
 
 # ------------------------------------------------------------------ 序列化
@@ -125,6 +126,12 @@ def serialize(ep: dict[str, Any], now: Optional[float] = None) -> dict[str, Any]
         "priority": ep["priority"],
         "enabled": bool(ep["enabled"]),
         "auto_disabled": bool(ep.get("auto_disabled") or 0),
+        "disabled_at": ep.get("disabled_at") or 0,
+        "auto_enable_at": ep.get("auto_enable_at") or 0,
+        "revive_left": (
+            max(0, int((ep.get("auto_enable_at") or 0) - now))
+            if (not ep["enabled"]) and (ep.get("auto_enable_at") or 0) > 0 else 0
+        ),
         "notes": ep["notes"],
         "status": status,
         "cooldown_left": cooldown_left,
@@ -174,7 +181,7 @@ async def lifespan(app: FastAPI):
 
 
 async def housekeeping_loop(stop: asyncio.Event) -> None:
-    """每 5 分钟裁日志、裁会话表、截断 WAL；一天最多 VACUUM 一次。"""
+    """每 5 分钟：裁日志、裁会话表、截断 WAL、处理到期复活的号；一天最多 VACUUM 一次。"""
     last_vacuum = time.time()
     while not stop.is_set():
         try:
@@ -185,6 +192,7 @@ async def housekeeping_loop(stop: asyncio.Event) -> None:
             db.checkpoint()
             if removed:
                 pool.log("info", "housekeeping", f"按保留策略清理日志 {removed} 条")
+            pool.revive_expired()  # 欠费停用满期的号自动回池
             if time.time() - last_vacuum > 86400:
                 if db.vacuum_if_bloated():
                     pool.log("info", "housekeeping", "空页占比偏高，已 VACUUM 收缩数据库")
@@ -397,17 +405,20 @@ async def delete_logs() -> dict[str, Any]:
 
 @app.post("/api/maintenance", dependencies=[Depends(admin)])
 async def maintenance() -> dict[str, Any]:
-    """立刻按保留策略清一次，并截断 WAL；空页多的话顺手 VACUUM。"""
+    """立刻清一次日志/会话、截断 WAL、处理到期复活的号；空页多的话顺手 VACUUM。"""
     settings = db.get_settings()
     removed = db.trim_logs(int(settings.get("log_keep") or 0),
                            int(settings.get("log_keep_hours") or 0))
     sessions = db.trim_affinity(int(settings.get("affinity_max") or 0))
     db.checkpoint()
+    revived = pool.revive_expired()
     vacuumed = db.vacuum_if_bloated()
-    pool.log("info", "admin", f"手动维护：清日志 {removed} 条，清会话 {sessions} 条")
+    pool.log("info", "admin", f"手动维护：清日志 {removed} 条，清会话 {sessions} 条，"
+                             f"到期复活 {len(revived)} 个")
     return {
         "removed_logs": removed,
         "removed_sessions": sessions,
+        "revived": [{"id": r["id"], "name": r["name"]} for r in revived],
         "vacuumed": vacuumed,
         "stats": db.stats(),
     }
