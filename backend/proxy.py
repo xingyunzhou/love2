@@ -173,7 +173,14 @@ async def handle(request: Request, path: str) -> Response:
 
             status = resp.status_code
             if status >= 400:
-                raw = await resp.aread()
+                try:
+                    raw = await resp.aread()
+                except httpx.HTTPError as exc:
+                    # 读错误响应体就断了，当网络故障处理，继续换号
+                    message = f"{type(exc).__name__}: {exc}"
+                    pool.report_failure(ep, "network", message)
+                    trace.append({"endpoint": ep["name"], "attempt": attempt, "error": message})
+                    continue
                 await resp.aclose()
                 kind, retryable = pool.classify(status, raw, settings)
                 if not retryable:

@@ -16,6 +16,7 @@ BEHAVIOR = {
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "MockUpstream/1.0"
+    protocol_version = "HTTP/1.1"  # 保持长连接，避免连接复用撞到已关闭的 socket
 
     def _key(self) -> str:
         auth = self.headers.get("authorization", "")

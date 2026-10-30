@@ -67,12 +67,15 @@
         <option value="50">50 条/页</option>
         <option value="100">100 条/页</option>
       </select>
+      <span class="spacer"></span>
+      <button id="bulkBtn" class="ghost" disabled>批量编辑 <b id="bulkCount">0</b></button>
     </div>
 
     <div class="table-wrap">
       <table class="pool">
         <thead>
           <tr>
+            <th class="col-check"><input id="checkAll" type="checkbox" title="全选当前页" /></th>
             <th>状态</th><th>名称</th><th>地址</th><th>密钥</th>
             <th>请求 / 成功</th><th>成功率</th><th>延迟</th><th>最近错误</th><th>操作</th>
           </tr>
@@ -192,6 +195,46 @@
     <div class="form-actions">
       <button type="button" class="ghost" onclick="document.getElementById('epDialog').close()">取消</button>
       <button type="submit" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="bulkDialog">
+  <form id="bulkForm" method="dialog">
+    <h2>批量编辑</h2>
+    <p class="muted" id="bulkSummary">—</p>
+
+    <h3 class="dlg-sec">动作</h3>
+    <label>对选中账号
+      <select name="action">
+        <option value="edit">只改下面的字段</option>
+        <option value="enable">启用</option>
+        <option value="disable">停用</option>
+        <option value="reset">重置（清冷却 + 启用 + 清统计）</option>
+        <option value="probe">探活一次</option>
+        <option value="delete">删除（不可恢复）</option>
+      </select>
+    </label>
+
+    <h3 class="dlg-sec">字段（留空 = 不修改）</h3>
+    <div class="row">
+      <label>权重<input name="weight" type="number" min="1" placeholder="不改" /></label>
+      <label>优先级<input name="priority" type="number" placeholder="不改" /></label>
+    </div>
+    <label>强制模型<input name="model" placeholder="不改；填 - 表示清空" /></label>
+    <label>备注<input name="notes" placeholder="不改；填 - 表示清空" /></label>
+    <div class="row">
+      <label>鉴权头名<input name="auth_header" placeholder="不改" /></label>
+      <label>鉴权前缀<input name="auth_prefix" placeholder="不改" /></label>
+    </div>
+    <label>统一替换 API Key<input name="api_key" placeholder="留空 = 不修改；会覆盖选中账号各自的 key" autocomplete="off" /></label>
+    <label>重命名为<input name="rename_prefix" placeholder="如 acct，生成 acct-01..acct-NN" /></label>
+
+    <label class="check"><input name="overwrite_all" type="checkbox" /> 不勾选只动当前页选中的，勾选则动「当前筛选结果全部」</label>
+
+    <div class="form-actions">
+      <button type="button" class="ghost" onclick="document.getElementById('bulkDialog').close()">取消</button>
+      <button type="submit" class="primary">执行</button>
     </div>
   </form>
 </dialog>

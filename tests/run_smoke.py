@@ -231,7 +231,54 @@ def main() -> int:
             assert any(l["kind"] == "route" for l in logs)
             print(f"  日志: {len(logs)} 条，种类 {sorted(k for k in kinds if k)}")
 
-            # 9) 前端静态资源
+            # 9) 批量编辑
+            made = []
+            for i in range(3):
+                r = client.post("/api/endpoints", headers=H,
+                                json={"name": f"bulk-{i}", "base_url": f"http://127.0.0.1:{PORTS[2]}",
+                                      "api_key": "sk-bulk", "notes": "old"})
+                assert r.status_code == 200, r.text
+                made.append(r.json()["id"])
+
+            r = client.post("/api/endpoints/bulk", headers=H,
+                            json={"ids": made, "action": "edit", "weight": 7, "priority": 3,
+                                  "notes": "批量改过", "model": "bulk-model"})
+            assert r.status_code == 200, r.text
+            assert r.json()["affected"] == 3, r.json()
+            snap = {e["id"]: e for e in client.get("/api/overview", headers=H).json()["endpoints"]}
+            assert all(snap[i]["weight"] == 7 and snap[i]["priority"] == 3
+                       and snap[i]["notes"] == "批量改过" and snap[i]["model"] == "bulk-model"
+                       for i in made), [snap[i] for i in made]
+
+            # 重命名 + 停用
+            r = client.post("/api/endpoints/bulk", headers=H,
+                            json={"ids": made, "action": "disable", "rename_prefix": "grp"}).json()
+            assert r["affected"] == 3, r
+            snap = {e["id"]: e for e in client.get("/api/overview", headers=H).json()["endpoints"]}
+            assert all(not snap[i]["enabled"] for i in made), snap
+            assert [snap[i]["name"] for i in made] == ["grp-01", "grp-02", "grp-03"], snap
+
+            # select_all + 视图过滤：只动停用区的
+            r = client.post("/api/endpoints/bulk", headers=H,
+                            json={"select_all": True, "view": "inactive", "keyword": "grp-",
+                                  "action": "enable"}).json()
+            assert r["affected"] == 3, r
+            snap = {e["id"]: e for e in client.get("/api/overview", headers=H).json()["endpoints"]}
+            assert all(snap[i]["enabled"] for i in made), snap
+
+            # 空目标要报错
+            assert client.post("/api/endpoints/bulk", headers=H,
+                               json={"ids": [], "action": "enable"}).status_code == 400
+
+            # 批量删除
+            r = client.post("/api/endpoints/bulk", headers=H,
+                            json={"ids": made, "action": "delete"}).json()
+            assert r["deleted"] == 3, r
+            left = {e["id"] for e in client.get("/api/overview", headers=H).json()["endpoints"]}
+            assert not (set(made) & left), left
+            print("  批量编辑: 字段 / 重命名 / 启停 / 全选筛选 / 删除 都 ok")
+
+            # 10) 前端静态资源
             r = client.get("/")
             assert r.status_code == 200 and "号池控制台" in r.text
             assert client.get("/app.js").status_code == 200

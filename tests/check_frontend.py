@@ -80,6 +80,10 @@ for needle, where, text in (
     (".ptab.active", CSS, "缺少 tab 选中样式"),
     (".pager button.on", CSS, "缺少分页当前页样式"),
     ("renderPager", JS, "app.js 没有分页渲染"),
+    ("/api/endpoints/bulk", JS, "app.js 没有调用批量接口"),
+    ('id="bulkBtn"', HTML, "缺少批量编辑按钮"),
+    ('id="bulkDialog"', HTML, "缺少批量编辑弹窗"),
+    ("row-check", JS, "表格没有勾选列"),
     ("revive_left", JS, "停用 tab 没有倒计时"),
     ("quota_revive_days", HTML, "设置里没有欠费自动启用天数"),
 ):
